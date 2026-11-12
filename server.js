@@ -270,9 +270,18 @@ function inferVideoRatio(size) {
 // 带 async=true，两者都返回 202 {id/task_id}，再轮询
 // GET /v1/images/tasks/{id} 直到 completed/failed。
 function resolveChannelUrl(channel, url) {
+  // 渠道返回的媒体 URL 可能指向它自己的内网地址（muse2api 的
+  // public_base 配的是 http://172.16.0.2:1314，任务里返回的视频 URL
+  // 就是这个内网地址，Uppcoder 上根本连不上，下载会报 fetch failed）。
+  // 只要路径对，换成渠道 Base URL 的域名就能走公网取到：
+  // 相对路径按 Base URL 解析；绝对地址但域名不同时，只换域名、保留路径。
   if (!url) return '';
-  if (/^https?:\/\//i.test(url)) return url;
-  try { return new URL(url, channel.baseUrl.replace(/\/$/, '') + '/').toString(); } catch { return url; }
+  try {
+    const base = new URL(channel.baseUrl.replace(/\/$/, '') + '/');
+    const u = new URL(url, base);
+    if (u.origin !== base.origin) u.protocol = base.protocol, u.host = base.host;
+    return u.toString();
+  } catch { return url; }
 }
 async function pollImageTask(channel, taskId) {
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
@@ -393,7 +402,7 @@ async function generateVideo(channel, body) {
   if (!taskId) {
     // 有些渠道直接返回视频 URL（同步）
     const direct = videoUrlFrom(createdData);
-    if (direct) return downloadToMedia(direct, 'video');
+    if (direct) return downloadToMedia(resolveChannelUrl(channel, direct), 'video');
     throw new Error('渠道没有返回视频任务 ID');
   }
   // 轮询：最多约 5 分钟
@@ -404,7 +413,7 @@ async function generateVideo(channel, body) {
     if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
     const data = (json && json.data) || json || {};
     const url = videoUrlFrom(data);
-    if (url) return downloadToMedia(url, 'video');
+    if (url) return downloadToMedia(resolveChannelUrl(channel, url), 'video');
     if (data.status === 'completed') {
       let contentRes; try { contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 120000); } catch (e) { e.doNotRetry = true; throw e; }
       if (!contentRes.ok) { const err = new Error('视频已完成但取回文件失败 HTTP ' + contentRes.status); err.isHttpError = true; err.httpStatus = contentRes.status; err.doNotRetry = true; throw err; }
