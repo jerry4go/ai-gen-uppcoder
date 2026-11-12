@@ -1,0 +1,1 @@
+{"description":"AI 生图 / 生视频（简化版，无画布）— 提示词生成图片或视频，图生视频，后台登录配渠道。零依赖 Node.js 服务，可部署到 Uppcoder Spark。","engines":{"node":">=20"},"license":"MIT","main":"server.js","name":"ai-gen-uppcoder","scripts":{"start":"node server.js"},"version":"1.0.0"}

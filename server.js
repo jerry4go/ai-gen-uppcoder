@@ -1,0 +1,491 @@
+'use strict';
+/**
+ * AI 生图 / 生视频（简化版无限画布的 Uppcoder 版）
+ * 没有画布、没有节点、没有 Agent、没有插件、没有音频。
+ * 前台：提示词框在上，生成结果在下；生图 / 生视频；图片可图生视频、可编辑提示词；
+ * 生视频可上传本地图片作首帧。
+ * 后台：登录验证后才能进，可配置模型渠道（OpenAI 兼容接口）。
+ * 零依赖：只用 Node.js 标准库。启动：node server.js（PORT 环境变量，默认 8000）
+ * 数据：./data/auth.json / channels.json / generations.json，生成的文件存 ./data/media/
+ * 部署要点：Uppcoder 把 /app/ 代理到本服务端口，所以同时接受 /api/... 和 /app/api/...，
+ * 静态资源用相对路径。密钥只存在服务器 ./data/，永不写进仓库、永不在前端明文返回。
+ */
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PORT = parseInt(process.env.PORT || '8000', 10);
+const HOST = '0.0.0.0';
+const ROOT = __dirname;
+const DATA_DIR = path.join(ROOT, 'data');
+const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const PUBLIC_DIR = path.join(ROOT, 'public');
+
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
+
+// ---------- JSON 文件存储 ----------
+function loadJson(name, fallback) {
+  try {
+    const p = path.join(DATA_DIR, name);
+    if (!fs.existsSync(p)) return fallback;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (e) { console.error('load', name, e.message); return fallback; }
+}
+function saveJson(name, data) {
+  const p = path.join(DATA_DIR, name);
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, p);
+}
+function newId() { return Date.now().toString(36) + crypto.randomBytes(4).toString('hex'); }
+function nowIso() { return new Date().toISOString(); }
+function cleanBaseUrl(u) { return String(u || '').trim().replace(/\/$/, ''); }
+
+// ---------- 管理员账号（首次登录强制改密码） ----------
+// 初始账号 admin / admin123，仅用于首次登录；登录后必须改密码才能管理渠道。
+// 密码以加盐 SHA-256 存 ./data/auth.json，仓库里没有任何密码。
+function hashPassword(password, salt) {
+  return crypto.createHash('sha256').update(salt + ':' + password).digest('hex');
+}
+function ensureAuth() {
+  let auth = loadJson('auth.json', null);
+  if (!auth || !auth.username || !auth.salt || !auth.hash) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    auth = { username: 'admin', salt, hash: hashPassword('admin123', salt), mustChangePassword: true, createdAt: nowIso() };
+    saveJson('auth.json', auth);
+    console.log('已创建初始管理员账号 admin（首次登录必须改密码）');
+  }
+  return auth;
+}
+let auth = ensureAuth();
+const sessions = new Map(); // token -> { username, expiresAt }
+function createSession(username) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { username, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+  return token;
+}
+function authFromReq(req) {
+  const h = req.headers.authorization || '';
+  const m = h.match(/^Bearer\s+(.+)$/);
+  if (!m) return null;
+  const s = sessions.get(m[1]);
+  if (!s || s.expiresAt < Date.now()) { sessions.delete(m[1]); return null; }
+  return s;
+}
+
+// ---------- 渠道 ----------
+let channels = loadJson('channels.json', []);
+if (!Array.isArray(channels)) channels = [];
+function maskKey(key) {
+  const k = String(key || '');
+  if (!k) return '';
+  if (k.length <= 8) return '********';
+  return '********' + k.slice(-4);
+}
+function publicChannel(c) {
+  return { id: c.id, name: c.name, baseUrl: c.baseUrl, apiKeyMasked: maskKey(c.apiKey), imageModel: c.imageModel || '', videoModel: c.videoModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault, createdAt: c.createdAt };
+}
+function publicChannelForFront(c) {
+  // 前台只需要知道名字、模型和能力，绝不返回 Key（哪怕是掩码以外的任何形式）
+  return { id: c.id, name: c.name, imageModel: c.imageModel || '', videoModel: c.videoModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault };
+}
+function pickChannel(channelId, kind) {
+  const list = channels.filter(c => c.enabled !== false && (c.capabilities || []).includes(kind));
+  if (!list.length) return null;
+  if (channelId) {
+    const c = list.find(x => x.id === channelId);
+    if (c) return c;
+  }
+  return list.find(x => x.isDefault) || list[0];
+}
+
+// ---------- 生成记录 ----------
+let generations = loadJson('generations.json', []);
+if (!Array.isArray(generations)) generations = [];
+function saveGeneration(g) {
+  generations.unshift(g);
+  generations = generations.slice(0, 100);
+  saveJson('generations.json', generations);
+  return g;
+}
+function mediaUrlFor(fileName) { return '/api/media/' + encodeURIComponent(fileName); }
+function extForMime(mime) {
+  if (!mime) return 'bin';
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('mp4')) return 'mp4';
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('gif')) return 'gif';
+  return 'bin';
+}
+function saveMediaBuffer(buf, mime, prefix) {
+  const ext = extForMime(mime);
+  const fileName = prefix + '-' + newId() + '.' + ext;
+  fs.writeFileSync(path.join(MEDIA_DIR, fileName), buf);
+  return { fileName, url: mediaUrlFor(fileName), bytes: buf.length, mimeType: mime || 'application/octet-stream' };
+}
+
+function fetchTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms || 20000);
+  return fetch(url, { ...(opts || {}), signal: ctrl.signal }).finally(() => clearTimeout(t));
+}
+
+async function downloadToMedia(url, prefix) {
+  const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 60000);
+  if (!res.ok) throw new Error('下载生成文件失败 HTTP ' + res.status);
+  const mime = (res.headers.get('content-type') || '').split(';')[0].trim() || (prefix === 'video' ? 'video/mp4' : 'image/png');
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('下载到的文件为空');
+  return saveMediaBuffer(buf, mime, prefix);
+}
+function dataUrlToBuffer(dataUrl) {
+  const m = String(dataUrl || '').match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+  if (!m) throw new Error('参考图格式不正确');
+  const mime = m[1] || 'image/png';
+  const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]), 'utf8');
+  return { mime, buf, ext: extForMime(mime) };
+}
+
+// ---------- multipart（给 /images/edits 和 /videos 用） ----------
+function buildMultipart(fields, files) {
+  const boundary = '----ai-gen-' + crypto.randomBytes(12).toString('hex');
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  }
+  for (const f of files) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${f.name}"; filename="${f.filename}"\r\nContent-Type: ${f.mime}\r\n\r\n`));
+    parts.push(f.buf);
+    parts.push(Buffer.from('\r\n'));
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+async function readJsonResponse(res) {
+  const text = await res.text();
+  try { return { json: JSON.parse(text), text }; } catch { return { json: null, text }; }
+}
+function channelErrorText(status, text) {
+  return '渠道返回 HTTP ' + status + ': ' + String(text || '').slice(0, 300);
+}
+
+// ---------- 生图 ----------
+async function generateImage(channel, body) {
+  const prompt = String(body.prompt || '').trim();
+  const size = String(body.size || '1024x1024');
+  const count = Math.min(4, Math.max(1, parseInt(body.count || '1', 10) || 1));
+  const model = String(body.imageModel || channel.imageModel || '').trim();
+  if (!model) throw new Error('该渠道没有配置生图模型，请先在后台填写 imageModel');
+  const headers = { Authorization: 'Bearer ' + channel.apiKey };
+  const results = [];
+  // 有参考图：走 /images/edits；没有：走 /images/generations
+  if (body.referenceImage) {
+    const ref = dataUrlToBuffer(body.referenceImage);
+    const { body: mpBody, contentType } = buildMultipart(
+      { model, prompt, size, n: '1' },
+      [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
+    );
+    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody });
+    const { json, text } = await readJsonResponse(res);
+    if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
+    const item = json && json.data && json.data[0];
+    if (!item) throw new Error('渠道没有返回图片');
+    results.push(await imageItemToMedia(item, 'image'));
+  } else {
+    const res = await fetchTimeout(channel.baseUrl + '/images/generations', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt, size, n: count }),
+    });
+    const { json, text } = await readJsonResponse(res);
+    if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
+    const items = (json && json.data) || [];
+    if (!items.length) throw new Error('渠道没有返回图片');
+    for (const item of items) results.push(await imageItemToMedia(item, 'image'));
+  }
+  return results;
+}
+async function imageItemToMedia(item, prefix) {
+  if (item.b64_json) return saveMediaBuffer(Buffer.from(item.b64_json, 'base64'), 'image/png', prefix);
+  if (item.url) return downloadToMedia(item.url, prefix);
+  throw new Error('渠道返回的图片没有可用的 b64_json 或 url');
+}
+
+// ---------- 生视频 ----------
+function videoUrlFrom(data) {
+  if (!data || typeof data !== 'object') return '';
+  return data.url || data.video_url || data.result_url || (data.content && (data.content.video_url || data.content.url)) || '';
+}
+async function generateVideo(channel, body) {
+  const prompt = String(body.prompt || '').trim();
+  const model = String(body.videoModel || channel.videoModel || '').trim();
+  if (!model) throw new Error('该渠道没有配置生视频模型，请先在后台填写 videoModel');
+  const seconds = String(body.seconds || '5');
+  const size = String(body.size || '1280x720');
+  const headers = { Authorization: 'Bearer ' + channel.apiKey };
+  // 首帧：优先用上传的参考图；其次用已生成图片的记录（sourceGenerationId）
+  let firstFrame = null;
+  if (body.referenceImage) firstFrame = dataUrlToBuffer(body.referenceImage);
+  else if (body.sourceGenerationId) {
+    const src = generations.find(g => g.id === body.sourceGenerationId);
+    if (src && src.fileName) {
+      const p = path.join(MEDIA_DIR, src.fileName);
+      if (fs.existsSync(p)) firstFrame = { mime: src.mimeType || 'image/png', buf: fs.readFileSync(p), ext: extForMime(src.mimeType) };
+    }
+  }
+  const fields = { model, prompt, seconds, size };
+  const files = [];
+  if (firstFrame) {
+    files.push({ name: 'first_frame', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
+    files.push({ name: 'images', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
+    fields.mode = 'frames';
+  }
+  const { body: mpBody, contentType } = buildMultipart(fields, files);
+  const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody });
+  const created = await readJsonResponse(createdRes);
+  if (!createdRes.ok) throw new Error(channelErrorText(createdRes.status, (created.json && (created.json.error && created.json.error.message)) || created.text));
+  const createdData = (created.json && created.json.data) || created.json || {};
+  const taskId = createdData.id;
+  if (!taskId) {
+    // 有些渠道直接返回视频 URL（同步）
+    const direct = videoUrlFrom(createdData);
+    if (direct) return downloadToMedia(direct, 'video');
+    throw new Error('渠道没有返回视频任务 ID');
+  }
+  // 轮询：最多约 5 分钟
+  for (let attempt = 0; attempt < 120; attempt++) {
+    await new Promise(r => setTimeout(r, 2500));
+    const res = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId), { headers }, 20000);
+    const { json, text } = await readJsonResponse(res);
+    if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
+    const data = (json && json.data) || json || {};
+    const url = videoUrlFrom(data);
+    if (url) return downloadToMedia(url, 'video');
+    if (data.status === 'completed') {
+      const contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 60000);
+      if (!contentRes.ok) throw new Error('视频已完成但取回文件失败 HTTP ' + contentRes.status);
+      const buf = Buffer.from(await contentRes.arrayBuffer());
+      return saveMediaBuffer(buf, 'video/mp4', 'video');
+    }
+    if (data.status === 'failed' || data.status === 'cancelled') {
+      throw new Error('视频生成失败：' + ((data.error && data.error.message) || data.status));
+    }
+  }
+  throw new Error('视频生成超时（轮询 5 分钟未完成），请稍后在生成记录里查看或重试');
+}
+
+// ---------- HTTP 工具 ----------
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+function readBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', (c) => { size += c.length; if (size > (maxBytes || 20 * 1024 * 1024)) { reject(new Error('请求体过大')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.mp4': 'video/mp4', '.webm': 'video/webm', '.svg': 'image/svg+xml' };
+function normalizePath(rawPath) {
+  let p = decodeURIComponent(rawPath || '/');
+  if (p === '/app' || p === '/app/') return '/';
+  if (p.startsWith('/app/')) p = p.slice(4);
+  if (!p.startsWith('/')) p = '/' + p;
+  return p;
+}
+function requireAdmin(req, res) {
+  const s = authFromReq(req);
+  if (!s) { sendJson(res, 401, { ok: false, error: '未登录，请先登录后台' }); return null; }
+  if (auth.mustChangePassword) { sendJson(res, 403, { ok: false, error: '首次登录必须先修改密码', mustChangePassword: true }); return null; }
+  return s;
+}
+
+// ---------- 路由 ----------
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    const pathname = normalizePath(u.pathname);
+    const method = req.method;
+
+    if (pathname.startsWith('/api/')) {
+      // GET /api/health（公开）
+      if (method === 'GET' && pathname === '/api/health') {
+        return sendJson(res, 200, { ok: true, service: 'ai-gen-uppcoder', time: nowIso(), channels: channels.filter(c => c.enabled !== false).length, generations: generations.length });
+      }
+      // GET /api/channels（前台用：只返回名字/模型/能力，不含 Key）
+      if (method === 'GET' && pathname === '/api/channels') {
+        return sendJson(res, 200, { ok: true, channels: channels.filter(c => c.enabled !== false).map(publicChannelForFront) });
+      }
+      // GET /api/generations（前台历史）
+      if (method === 'GET' && pathname === '/api/generations') {
+        return sendJson(res, 200, { ok: true, total: generations.length, generations: generations.map(g => ({ ...g, fileName: undefined })) });
+      }
+      // GET /api/media/:file（生成的文件，公开播放/查看；文件名是随机 ID，不可猜）
+      if (method === 'GET' && pathname.startsWith('/api/media/')) {
+        const fileName = pathname.slice('/api/media/'.length);
+        if (!fileName || fileName.includes('/') || fileName.includes('..')) return sendJson(res, 400, { ok: false, error: '文件名不正确' });
+        const full = path.join(MEDIA_DIR, fileName);
+        if (!full.startsWith(MEDIA_DIR) || !fs.existsSync(full)) return sendJson(res, 404, { ok: false, error: '文件不存在' });
+        const ext = path.extname(full).toLowerCase();
+        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' });
+        return fs.createReadStream(full).pipe(res);
+      }
+      // POST /api/generate（前台生成：生图 / 生视频）
+      if (method === 'POST' && pathname === '/api/generate') {
+        const body = JSON.parse(await readBody(req) || '{}');
+        const type = body.type === 'video' ? 'video' : 'image';
+        const prompt = String(body.prompt || '').trim();
+        if (!prompt) return sendJson(res, 400, { ok: false, error: '请先输入提示词' });
+        const channel = pickChannel(body.channelId, type);
+        if (!channel) return sendJson(res, 400, { ok: false, error: type === 'video' ? '没有可用的生视频渠道，请先在后台添加支持视频的渠道并填写 videoModel' : '没有可用的生图渠道，请先在后台添加渠道并填写 imageModel' });
+        const model = type === 'video' ? (body.videoModel || channel.videoModel) : (body.imageModel || channel.imageModel);
+        try {
+          const items = type === 'video'
+            ? [await generateVideo(channel, { ...body, videoModel: model })]
+            : await generateImage(channel, { ...body, imageModel: model });
+          const made = items.map(it => saveGeneration({
+            id: newId(), type, prompt, channelId: channel.id, channelName: channel.name, model,
+            status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType,
+            source: body.sourceGenerationId ? 'image-to-video' : (body.referenceImage ? 'reference-image' : 'text'), createdAt: nowIso(),
+          }));
+          return sendJson(res, 200, { ok: true, type, generations: made.map(g => ({ ...g, fileName: undefined })) });
+        } catch (e) {
+          console.error('generate failed:', e.message);
+          const friendly = e.message === 'fetch failed'
+            ? ('无法连接渠道 ' + channel.baseUrl + '，请检查 Base URL 是否正确、网络是否通、Key 是否有效')
+            : (e.message || '生成失败');
+          saveGeneration({ id: newId(), type, prompt, channelId: channel.id, channelName: channel.name, model, status: 'failed', url: '', fileName: '', bytes: 0, mimeType: '', error: friendly, createdAt: nowIso() });
+          return sendJson(res, 502, { ok: false, error: friendly });
+        }
+      }
+      // DELETE /api/generations/:id（删除一条记录及文件）
+      if (method === 'DELETE' && pathname.startsWith('/api/generations/')) {
+        const id = pathname.slice('/api/generations/'.length);
+        const idx = generations.findIndex(g => g.id === id);
+        if (idx < 0) return sendJson(res, 404, { ok: false, error: '记录不存在' });
+        const g = generations[idx];
+        if (g.fileName) { try { fs.unlinkSync(path.join(MEDIA_DIR, g.fileName)); } catch {} }
+        generations.splice(idx, 1); saveJson('generations.json', generations);
+        return sendJson(res, 200, { ok: true });
+      }
+      // ---- 管理员登录 ----
+      if (method === 'POST' && pathname === '/api/auth/login') {
+        const body = JSON.parse(await readBody(req) || '{}');
+        const username = String(body.username || '').trim();
+        const password = String(body.password || '');
+        if (username !== auth.username || hashPassword(password, auth.salt) !== auth.hash) {
+          return sendJson(res, 401, { ok: false, error: '账号或密码不正确' });
+        }
+        const token = createSession(username);
+        return sendJson(res, 200, { ok: true, token, username, mustChangePassword: !!auth.mustChangePassword });
+      }
+      if (method === 'POST' && pathname === '/api/auth/change-password') {
+        const s = authFromReq(req);
+        if (!s) return sendJson(res, 401, { ok: false, error: '未登录，请先登录后台' });
+        const body = JSON.parse(await readBody(req) || '{}');
+        const current = String(body.currentPassword || '');
+        const next = String(body.newPassword || '');
+        if (hashPassword(current, auth.salt) !== auth.hash) return sendJson(res, 400, { ok: false, error: '当前密码不正确' });
+        if (next.length < 6) return sendJson(res, 400, { ok: false, error: '新密码至少 6 位' });
+        const salt = crypto.randomBytes(16).toString('hex');
+        auth = { ...auth, salt, hash: hashPassword(next, salt), mustChangePassword: false };
+        saveJson('auth.json', auth);
+        sessions.clear();
+        return sendJson(res, 200, { ok: true, message: '密码已修改，请用新密码重新登录' });
+      }
+      if (method === 'GET' && pathname === '/api/auth/status') {
+        const s = authFromReq(req);
+        return sendJson(res, 200, { ok: true, loggedIn: !!s, username: s ? s.username : '', mustChangePassword: !!auth.mustChangePassword });
+      }
+      if (method === 'POST' && pathname === '/api/auth/logout') {
+        const h = req.headers.authorization || '';
+        const m = h.match(/^Bearer\s+(.+)$/);
+        if (m) sessions.delete(m[1]);
+        return sendJson(res, 200, { ok: true });
+      }
+      // ---- 后台渠道管理（全部要登录，且首次登录改完密码后才能用） ----
+      if (pathname.startsWith('/api/admin/')) {
+        if (method === 'GET' && pathname === '/api/admin/channels') {
+          if (!requireAdmin(req, res)) return;
+          return sendJson(res, 200, { ok: true, channels: channels.map(publicChannel) });
+        }
+        if (method === 'POST' && pathname === '/api/admin/channels') {
+          if (!requireAdmin(req, res)) return;
+          const body = JSON.parse(await readBody(req) || '{}');
+          if (!String(body.name || '').trim() || !cleanBaseUrl(body.baseUrl) || !String(body.apiKey || '').trim()) {
+            return sendJson(res, 400, { ok: false, error: '名称、Base URL、API Key 都要填' });
+          }
+          const caps = Array.isArray(body.capabilities) ? body.capabilities.filter(x => x === 'image' || x === 'video') : [];
+          if (!caps.length) return sendJson(res, 400, { ok: false, error: '至少选一种能力：生图或生视频' });
+          const c = { id: newId(), name: String(body.name).trim(), baseUrl: cleanBaseUrl(body.baseUrl), apiKey: String(body.apiKey).trim(), imageModel: String(body.imageModel || '').trim(), videoModel: String(body.videoModel || '').trim(), capabilities: caps, enabled: body.enabled !== false, isDefault: !!body.isDefault, createdAt: nowIso() };
+          if (c.isDefault) channels.forEach(x => { x.isDefault = false; });
+          channels.push(c); saveJson('channels.json', channels);
+          return sendJson(res, 200, { ok: true, channel: publicChannel(c) });
+        }
+        if ((method === 'PUT' || method === 'DELETE') && pathname.startsWith('/api/admin/channels/')) {
+          if (!requireAdmin(req, res)) return;
+          const id = pathname.slice('/api/admin/channels/'.length).split('/')[0];
+          const idx = channels.findIndex(x => x.id === id);
+          if (idx < 0) return sendJson(res, 404, { ok: false, error: '渠道不存在' });
+          if (method === 'DELETE') {
+            channels.splice(idx, 1); saveJson('channels.json', channels);
+            return sendJson(res, 200, { ok: true });
+          }
+          const body = JSON.parse(await readBody(req) || '{}');
+          const c = channels[idx];
+          if (body.name !== undefined) c.name = String(body.name).trim() || c.name;
+          if (body.baseUrl !== undefined) c.baseUrl = cleanBaseUrl(body.baseUrl) || c.baseUrl;
+          if (body.apiKey !== undefined && String(body.apiKey).trim() && !String(body.apiKey).startsWith('********')) c.apiKey = String(body.apiKey).trim();
+          if (body.imageModel !== undefined) c.imageModel = String(body.imageModel).trim();
+          if (body.videoModel !== undefined) c.videoModel = String(body.videoModel).trim();
+          if (Array.isArray(body.capabilities)) c.capabilities = body.capabilities.filter(x => x === 'image' || x === 'video');
+          if (body.enabled !== undefined) c.enabled = !!body.enabled;
+          if (body.isDefault) { channels.forEach(x => { x.isDefault = false; }); c.isDefault = true; }
+          saveJson('channels.json', channels);
+          return sendJson(res, 200, { ok: true, channel: publicChannel(c) });
+        }
+        if (method === 'POST' && pathname.startsWith('/api/admin/channels/') && pathname.endsWith('/test')) {
+          if (!requireAdmin(req, res)) return;
+          const id = pathname.slice('/api/admin/channels/'.length, -'/test'.length).replace(/\/$/, '');
+          const c = channels.find(x => x.id === id);
+          if (!c) return sendJson(res, 404, { ok: false, error: '渠道不存在' });
+          try {
+            const r = await fetchTimeout(c.baseUrl + '/models', { headers: { Authorization: 'Bearer ' + c.apiKey } }, 15000);
+            const { json, text } = await readJsonResponse(r);
+            if (!r.ok) return sendJson(res, 200, { ok: false, error: channelErrorText(r.status, (json && (json.error && json.error.message)) || text) });
+            const models = (json && json.data) || [];
+            return sendJson(res, 200, { ok: true, models: models.slice(0, 20).map(m => m.id || m), total: models.length });
+          } catch (e) {
+            return sendJson(res, 200, { ok: false, error: '连接失败：' + e.message });
+          }
+        }
+        return sendJson(res, 404, { ok: false, error: '未知后台接口：' + pathname });
+      }
+      return sendJson(res, 404, { ok: false, error: '未知接口：' + pathname });
+    }
+
+    // ---- 静态文件 ----
+    let filePath = pathname === '/' ? '/index.html' : pathname;
+    const safe = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, '');
+    let full = path.join(PUBLIC_DIR, safe);
+    if (!full.startsWith(PUBLIC_DIR)) return sendJson(res, 403, { ok: false, error: 'forbidden' });
+    if (fs.existsSync(full) && fs.statSync(full).isDirectory()) full = path.join(full, 'index.html');
+    if (!fs.existsSync(full)) full = path.join(PUBLIC_DIR, 'index.html');
+    const ext = path.extname(full).toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    fs.createReadStream(full).pipe(res);
+  } catch (e) {
+    console.error(e);
+    if (!res.headersSent) sendJson(res, 500, { ok: false, error: e.message });
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log('AI 生图/生视频已启动 http://' + HOST + ':' + PORT + '/  渠道：' + channels.length + ' 个，生成记录：' + generations.length + ' 条');
+});
