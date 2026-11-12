@@ -101,6 +101,8 @@ async function pollUntilDone(onDone) {
     const { data } = await apiJson('/api/generations');
     const list = data.ok ? data.generations : [];
     await loadResults(list);
+    const generating = list.find((g) => g.status === 'generating');
+    if (generating && generating.note) setStatus($('gen-status'), generating.note);
     if (!list.some((g) => g.status === 'generating')) {
       stopPolling();
       const btn = $('btn-generate');
@@ -140,7 +142,7 @@ async function loadResults(preloaded) {
   $('empty-state').hidden = list.length > 0;
   $('results').innerHTML = list.map((g) => {
     const mediaHtml = g.status === 'generating'
-      ? `<div style="padding:40px;text-align:center;color:#666">⏳ 生成中（模型那边还在生成，请稍等）…</div>`
+      ? `<div style="padding:40px;text-align:center;color:#666">⏳ ${esc(g.note || '生成中（模型那边还在生成，请稍等）…')}</div>`
       : g.type === 'video'
       ? `<video src="${media(g.url)}" controls preload="metadata"></video>`
       : (g.url ? `<img src="${media(g.url)}" alt="">` : `<div style="padding:40px;text-align:center;color:#999">图片已失效</div>`);
@@ -148,7 +150,7 @@ async function loadResults(preloaded) {
     return `<div class="result">${mediaHtml}<div class="meta">
       <p><b>${g.type === 'video' ? '视频' : '图片'}</b> · ${esc(g.channelName || '')} · ${esc(g.model || '')}</p>
       <p>${esc(g.prompt || '')}</p>
-      <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'generating' ? '· 生成中…' : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
+      <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'generating' ? '· ' + esc(g.note || '生成中…') : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
       </div><div class="actions">${extra}
       ${g.url ? `<a class="btn" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
       <button class="btn danger" data-act="delete" data-id="${g.id}">删除</button>
