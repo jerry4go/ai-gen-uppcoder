@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 生图 / 生视频</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>🎨 AI 生图 / 生视频</h1>
+    <p class="sub">输入提示词，生成图片或视频 · 生成的文件下载后保存在服务器 ./data/media/</p>
+  </div>
+  <div class="top-right">
+    <span class="health" id="health">检测中…</span>
+    <button class="btn ghost" id="btn-logout" hidden>退出登录</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="front" class="active">生成</button>
+  <button data-tab="admin">后台 · 渠道配置</button>
+</nav>
+
+<main>
+  <!-- 前台 -->
+  <section id="tab-front" class="tab active">
+    <div class="card">
+      <h2>写提示词，生成图片或视频</h2>
+      <div class="row">
+        <div class="seg" id="type-seg">
+          <button data-type="image" class="active">🖼️ 生图</button>
+          <button data-type="video">🎬 生视频</button>
+        </div>
+        <select id="gen-channel" title="渠道"><option value="">自动选择渠道</option></select>
+        <select id="gen-model" title="模型"><option value="">自动选择模型</option></select>
+      </div>
+      <textarea id="prompt" rows="4" placeholder="例如：一只橘猫坐在窗台上看雨，电影感，暖色调…"></textarea>
+      <div class="row" id="image-opts">
+        <label>尺寸 <select id="img-size"><option>1024x1024</option><option>1024x1792</option><option>1792x1024</option><option>512x512</option></select></label>
+        <label>数量 <select id="img-count"><option>1</option><option>2</option><option>4</option></select></label>
+      </div>
+      <div class="row" id="video-opts" hidden>
+        <label>时长 <select id="vid-seconds"><option>5</option><option>10</option></select></label>
+        <label>尺寸 <select id="vid-size"><option>1280x720</option><option>720x1280</option><option>1920x1080</option></select></label>
+      </div>
+      <div class="row" id="ref-row" hidden>
+        <label class="btn ghost">📷 上传参考图（作视频首帧） <input type="file" id="ref-file" accept="image/*" hidden></label>
+        <span id="ref-name" class="muted"></span>
+        <button class="btn ghost" id="btn-clear-ref" hidden>移除参考图</button>
+      </div>
+      <div id="ref-preview"></div>
+      <div class="row">
+        <button class="btn primary" id="btn-generate">✨ 生成</button>
+        <button class="btn ghost" id="btn-clear-prompt">清空提示词</button>
+        <span id="gen-status" class="status"></span>
+      </div>
+      <p class="hint" id="channel-hint">还没有配置渠道？点上方“后台 · 渠道配置”登录后添加一个 OpenAI 兼容渠道（Base URL + API Key + 模型名）。</p>
+    </div>
+
+    <div class="card">
+      <h2>生成结果 <span id="result-count" class="muted"></span></h2>
+      <div class="row"><button class="btn ghost" id="btn-refresh">↻ 刷新</button><span class="muted">图片卡片上有“图生视频”和“编辑提示词”；生视频时可在上方上传参考图。</span></div>
+      <div id="results" class="results"></div>
+      <p id="empty-state" class="empty">还没有生成结果，在上面写好提示词，点“生成”即可。</p>
+    </div>
+  </section>
+
+  <!-- 后台 -->
+  <section id="tab-admin" class="tab">
+    <div class="card" id="login-card">
+      <h2>后台登录</h2>
+      <p class="hint">后台需要登录验证。首次登录账号 <b>admin</b>，初始密码 <b>admin123</b>，登录后必须先修改密码才能管理渠道。</p>
+      <div class="form">
+        <label>账号 <input id="login-user" value="admin" autocomplete="username"></label>
+        <label>密码 <input id="login-pass" type="password" placeholder="输入密码" autocomplete="current-password"></label>
+        <button class="btn primary" id="btn-login">登录</button>
+        <p id="login-status" class="status"></p>
+      </div>
+    </div>
+
+    <div class="card" id="change-card" hidden>
+      <h2>首次登录，请先修改密码</h2>
+      <p class="hint">为了安全，初始密码不能直接用，必须先改成你自己的密码，改完后需要重新登录。</p>
+      <div class="form">
+        <label>当前密码 <input id="cp-current" type="password" autocomplete="current-password"></label>
+        <label>新密码（至少 6 位） <input id="cp-new" type="password" autocomplete="new-password"></label>
+        <label>确认新密码 <input id="cp-confirm" type="password" autocomplete="new-password"></label>
+        <button class="btn primary" id="btn-change-pass">修改密码并重新登录</button>
+        <p id="cp-status" class="status"></p>
+      </div>
+    </div>
+
+    <div id="admin-main" hidden>
+      <div class="card">
+        <h2>模型渠道 <span id="channel-count" class="muted"></span></h2>
+        <p class="hint">渠道是 OpenAI 兼容接口：填 Base URL（不带末尾 /）、API Key、生图模型 / 生视频模型。Key 只存在服务器 ./data/channels.json，前台和列表里只显示掩码。生成走服务器代理，结果下载后存在服务器 ./data/media/。</p>
+        <div id="channel-list"></div>
+      </div>
+      <div class="card">
+        <h2 id="channel-form-title">添加渠道</h2>
+        <div class="form">
+          <input type="hidden" id="ch-id">
+          <label>名称 <input id="ch-name" placeholder="例如：我的生图渠道"></label>
+          <label>Base URL <input id="ch-base" placeholder="https://api.example.com/v1"></label>
+          <label>API Key <input id="ch-key" type="password" placeholder="sk-…（编辑时留空表示不改）" autocomplete="off"></label>
+          <label>生图模型 <input id="ch-img-model" placeholder="例如：gpt-image-1"></label>
+          <label>生视频模型 <input id="ch-vid-model" placeholder="例如：sora-2 / veo-3（没有就留空）"></label>
+          <div class="row">
+            <label><input type="checkbox" id="ch-cap-image" checked> 生图</label>
+            <label><input type="checkbox" id="ch-cap-video"> 生视频</label>
+            <label><input type="checkbox" id="ch-enabled" checked> 启用</label>
+            <label><input type="checkbox" id="ch-default"> 设为默认渠道</label>
+          </div>
+          <div class="row">
+            <button class="btn primary" id="btn-save-channel">保存渠道</button>
+            <button class="btn ghost" id="btn-cancel-channel">取消编辑</button>
+          </div>
+          <p id="channel-status" class="status"></p>
+        </div>
+      </div>
+      <div class="card">
+        <h2>修改后台密码</h2>
+        <div class="form">
+          <label>当前密码 <input id="cp2-current" type="password"></label>
+          <label>新密码（至少 6 位） <input id="cp2-new" type="password"></label>
+          <button class="btn" id="btn-change-pass2">修改密码</button>
+          <p id="cp2-status" class="status"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">没有画布、没有节点。数据在服务器 ./data/（channels.json / generations.json / media/）。Uppcoder 容器重建后数据会丢失，记得定期备份 ./data/。</footer>
+<script src="./app.js"></script>
+</body>
+</html>
