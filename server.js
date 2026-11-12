@@ -230,6 +230,34 @@ function isRetryableError(e) {
   return false;
 }
 
+// ---------- 与原版 infinite-canvas 对齐的请求格式 ----------
+// 原版 web/src/services/api/image.ts requestGeneration / requestEdit：
+// 生图默认不加 response_format 时，muse2api 返回的是沙箱服务上的 URL，
+// 后续下载那一步会报 502 "The sandbox service disconnected or is unavailable."；
+// 原版要求 response_format: "b64_json" + output_format: "png"，图片以内联 base64
+// 在同一次响应里返回，根本不走沙箱下载。gpt-image 模型会拒绝 response_format，
+// 原版对它省略该字段（它本来就返回 b64）。
+const IMAGE_OUTPUT_FORMAT = 'png';
+function imageFormatFields(model) {
+  // gpt-image 模型拒绝 response_format；其它模型按原版加 b64_json + png。
+  return /gpt-image/.test(model) ? { output_format: IMAGE_OUTPUT_FORMAT } : { response_format: 'b64_json', output_format: IMAGE_OUTPUT_FORMAT };
+}
+
+// 原版 web/src/services/api/video.ts createOpenAIVideoTask：ratio 由 size 推断
+// （auto 时省略），resolution_name 默认 720p，generate_audio true，watermark false，
+// mode 为 frames（只有 mode=reference 或参考图 >2 张时才是 reference；本应用
+// 最多一张参考图，所以始终 frames）。
+function inferVideoRatio(size) {
+  if (!size || size === 'auto') return 'auto';
+  const ratios = [['1:1', 1], ['3:4', 3 / 4], ['4:3', 4 / 3], ['16:9', 16 / 9], ['9:16', 9 / 16], ['21:9', 21 / 9]];
+  const direct = ratios.find(([v]) => v === size);
+  if (direct) return direct[0];
+  const m = String(size).match(/^(\d+)\s*x\s*(\d+)$/);
+  if (!m) return '16:9';
+  const target = Number(m[1]) / Number(m[2]);
+  return ratios.reduce((best, [v, r]) => (Math.abs(r - target) < Math.abs(ratios.find(([bv]) => bv === best)[1] - target) ? v : best), '16:9');
+}
+
 // ---------- 生图 ----------
 async function generateImage(channel, body) {
   const prompt = String(body.prompt || '').trim();
@@ -240,10 +268,11 @@ async function generateImage(channel, body) {
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
   const results = [];
   // 有参考图：走 /images/edits；没有：走 /images/generations
+  // 两者都按原版加 response_format/output_format（见上），让渠道内联返回 b64。
   if (body.referenceImage) {
     const ref = dataUrlToBuffer(body.referenceImage);
     const { body: mpBody, contentType } = buildMultipart(
-      { model, prompt, size, n: '1' },
+      { model, prompt, size, n: '1', ...imageFormatFields(model) },
       [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
     );
     const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TIMEOUT_MS);
@@ -256,7 +285,7 @@ async function generateImage(channel, body) {
     const res = await fetchTimeout(channel.baseUrl + '/images/generations', {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, size, n: count }),
+      body: JSON.stringify({ model, prompt, size, n: count, ...imageFormatFields(model) }),
     }, IMAGE_TIMEOUT_MS);
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
@@ -294,12 +323,15 @@ async function generateVideo(channel, body) {
       if (fs.existsSync(p)) firstFrame = { mime: src.mimeType || 'image/png', buf: fs.readFileSync(p), ext: extForMime(src.mimeType) };
     }
   }
-  const fields = { model, prompt, seconds, size };
+  // 按原版 createOpenAIVideoTask 补齐字段：ratio / resolution_name /
+  // generate_audio / watermark / mode（mode 始终 frames，见上）。
+  const ratio = inferVideoRatio(size);
+  const fields = { model, prompt, seconds, size, ...(ratio && ratio !== 'auto' ? { ratio } : {}), resolution_name: '720p', generate_audio: 'true', watermark: 'false', mode: 'frames' };
   const files = [];
   if (firstFrame) {
     files.push({ name: 'first_frame', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
     files.push({ name: 'images', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
-    fields.mode = 'frames';
+    
   }
   const { body: mpBody, contentType } = buildMultipart(fields, files);
   const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, VIDEO_CREATE_TIMEOUT_MS);
