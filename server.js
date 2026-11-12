@@ -215,11 +215,14 @@ function channelErrorText(status, text) {
 // 2026-11-12 实测：重试 3 次导致渠道侧直接生成了 3 张图。渠道收到 POST 就会立刻开始生成，
 // 报 502 时生成其实已经在渠道侧启动了，再发一次 POST 不是“恢复第一张图”，而是又烧一次全新的生成。
 // 所以收到渠道返回的 HTTP 错误（502/503/504/429/401/403/404/400 等）时一次都不重试，立即按原样记失败；
-// 想再试由用户手动点生成。注意：/images/generations 是纯同步接口，没有任务 ID 可供事后查询，
+// 想再试由用户手动点生成。注意：旧版同步 /images/generations 没有任务 ID，断开后无法事后查询已生成的图；新版改走异步任务（见下），任务有 ID、可轮询查询。这一点没有变的是“重发”仍是错的——建任务本身就会烧一次生成。
 // 只有根本没收到任何 HTTP 响应时（fetch 失败、连接被重置、超时 abort）才重试 1 次（共 2 次调用），间隔 10 秒。
 const MAX_GENERATION_ATTEMPTS = 2;
 const RETRY_BACKOFF_MS = [10000]; // 传输层失败后等 10 秒重试 1 次
-const IMAGE_TIMEOUT_MS = 600000; // 生图单次调用 10 分钟
+const IMAGE_TASK_CREATE_TIMEOUT_MS = 15000; // 建生图任务：一次快速请求
+const IMAGE_TASK_POLL_TIMEOUT_MS = 20000; // 轮询任务状态：一次快速请求
+const IMAGE_TASK_POLL_INTERVAL_MS = 2500; // 轮询间隔
+const IMAGE_TASK_MAX_POLLS = 240; // 最多约 10 分钟
 const VIDEO_CREATE_TIMEOUT_MS = 300000; // 生视频建任务 5 分钟
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function channelHttpError(status, text) {   const err = new Error(channelErrorText(status, text));   err.isHttpError = true;   err.httpStatus = status;   return err; } function isHttpError(e) {   if (e && e.isHttpError) return true;   const msg = String((e && e.message) || e || '');   return /^渠道返回 HTTP \d+/.test(msg) || /^下载生成文件失败 HTTP \d+/.test(msg) || /^取回文件失败 HTTP \d+/.test(msg); } function isTransportError(e) {
@@ -231,12 +234,7 @@ function channelHttpError(status, text) {   const err = new Error(channelErrorTe
 }
 
 // ---------- 与原版 infinite-canvas 对齐的请求格式 ----------
-// 原版 web/src/services/api/image.ts requestGeneration / requestEdit：
-// 生图默认不加 response_format 时，muse2api 返回的是沙箱服务上的 URL，
-// 后续下载那一步会报 502 "The sandbox service disconnected or is unavailable."；
-// 原版要求 response_format: "b64_json" + output_format: "png"，图片以内联 base64
-// 在同一次响应里返回，根本不走沙箱下载。gpt-image 模型会拒绝 response_format，
-// 原版对它省略该字段（它本来就返回 b64）。
+// 原版 web/src/services/api/image.ts requestGeneration / requestEdit：生图带 response_format: "b64_json" + output_format: "png"（gpt-image 模型按原版省略 response_format，它本来就返回 b64），图片以内联 base64 返回，不走 URL 下载。
 const IMAGE_OUTPUT_FORMAT = 'png';
 function imageFormatFields(model) {
   // gpt-image 模型拒绝 response_format；其它模型按原版加 b64_json + png。
@@ -259,6 +257,59 @@ function inferVideoRatio(size) {
 }
 
 // ---------- 生图 ----------
+// ---------- 生图（异步任务 + 轮询，绕过反代 20 秒超时） ----------
+// 2026-11-12 在 my-free-test-vm 上实测的根因：muse2api 的同步
+// /images/generations 一次要等 ~27 秒，而 Instabox 公网代理
+// （1314-….instabox.tech）在 ~20 秒就把长连接掐断，返回 502
+// "The sandbox service disconnected or is unavailable."；机器本地调
+// 127.0.0.1:1314 同一请求 27 秒 200 成功。muse2api 自带异步任务
+// 接口就是为此设计的（注释原话："Opt-in polling avoids
+// reverse-proxy timeouts"）：建任务 0.2 秒返回，之后每次轮询都
+// 只要 0.1~0.2 秒，单次请求永远碰不到 20 秒上限，轮询本身不重复
+// 生成。生图走 POST /v1/images/tasks，图生图走 POST /images/edits
+// 带 async=true，两者都返回 202 {id/task_id}，再轮询
+// GET /v1/images/tasks/{id} 直到 completed/failed。
+function resolveChannelUrl(channel, url) {
+  if (!url) return '';
+  if (/^https?:\/\/i.test(url)) return url;
+  try { return new URL(url, channel.baseUrl.replace(/\/$/, '') + '/').toString(); } catch { return url; }
+}
+async function pollImageTask(channel, taskId) {
+  const headers = { Authorization: 'Bearer ' + channel.apiKey };
+  for (let attempt = 0; attempt < IMAGE_TASK_MAX_POLLS; attempt++) {
+    await sleep(IMAGE_TASK_POLL_INTERVAL_MS);
+    let res;
+    try {
+      res = await fetchTimeout(channel.baseUrl + '/images/tasks/' + encodeURIComponent(taskId), { headers }, IMAGE_TASK_POLL_TIMEOUT_MS);
+    } catch (e) {
+      if (e && typeof e === 'object') e.doNotRetry = true;
+      throw e;
+    }
+    const { json, text } = await readJsonResponse(res);
+    if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
+    const task = json || {};
+    const status = String(task.status || '');
+    if (status === 'failed') {
+      const err = new Error('渠道图片任务失败：' + String(task.error || '未知错误').slice(0, 300));
+      err.doNotRetry = true;
+      throw err;
+    }
+    if (status === 'completed') {
+      const items = (task.data && task.data) || [];
+      const item = items[0];
+      if (item) {
+        if (item.b64_json) return saveMediaBuffer(Buffer.from(item.b64_json, 'base64'), 'image/png', 'image');
+        if (item.url) return downloadToMedia(resolveChannelUrl(channel, item.url), 'image');
+      }
+      const resultUrl = task.result && task.result.url;
+      if (resultUrl) return downloadToMedia(resolveChannelUrl(channel, resultUrl), 'image');
+      throw new Error('渠道图片任务已完成，但没有返回图片');
+    }
+  }
+  const err = new Error('渠道图片任务轮询超时（约 10 分钟），请稍后重试');
+  err.doNotRetry = true;
+  throw err;
+}
 async function generateImage(channel, body) {
   const prompt = String(body.prompt || '').trim();
   const size = String(body.size || '1024x1024');
@@ -267,35 +318,35 @@ async function generateImage(channel, body) {
   if (!model) throw new Error('该渠道没有配置生图模型，请先在后台填写 imageModel');
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
   const results = [];
-  // 有参考图：走 /images/edits；没有：走 /images/generations
-  // 两者都按原版加 response_format/output_format（见上），让渠道内联返回 b64。
-  if (body.referenceImage) {
-    const ref = dataUrlToBuffer(body.referenceImage);
-    const { body: mpBody, contentType } = buildMultipart(
-      { model, prompt, size, n: '1', ...imageFormatFields(model) },
-      [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
-    );
-    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TIMEOUT_MS);
-    const { json, text } = await readJsonResponse(res);
-    if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
-    const item = json && json.data && json.data[0];
-    if (!item) throw new Error('渠道没有返回图片');
-    results.push(await imageItemToMedia(item, 'image'));
-  } else {
-    const res = await fetchTimeout(channel.baseUrl + '/images/generations', {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, size, n: count, ...imageFormatFields(model) }),
-    }, IMAGE_TIMEOUT_MS);
-    const { json, text } = await readJsonResponse(res);
-    if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
-    const items = (json && json.data) || [];
-    if (!items.length) throw new Error('渠道没有返回图片');
-    for (const item of items) results.push(await imageItemToMedia(item, 'image'));
+  for (let i = 0; i < count; i++) {
+    let taskId = '';
+    if (body.referenceImage) {
+      const ref = dataUrlToBuffer(body.referenceImage);
+      const { body: mpBody, contentType } = buildMultipart(
+        { model, prompt, size, n: '1', async: 'true', ...imageFormatFields(model) },
+        [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
+      );
+      const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TASK_CREATE_TIMEOUT_MS);
+      const { json, text } = await readJsonResponse(res);
+      if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
+      taskId = (json && (json.task_id || json.id)) || '';
+    } else {
+      const res = await fetchTimeout(channel.baseUrl + '/images/tasks', {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt, size, n: 1, ...imageFormatFields(model) }),
+      }, IMAGE_TASK_CREATE_TIMEOUT_MS);
+      const { json, text } = await readJsonResponse(res);
+      if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
+      taskId = (json && (json.task_id || json.id)) || '';
+    }
+    if (!taskId) throw new Error('渠道没有返回图片任务 ID');
+    results.push(await pollImageTask(channel, taskId));
   }
   return results;
 }
 async function imageItemToMedia(item, prefix) {
+  // 保留供其它调用方使用（生图主流程现走任务轮询，见 pollImageTask）。
   if (item.b64_json) return saveMediaBuffer(Buffer.from(item.b64_json, 'base64'), 'image/png', prefix);
   if (item.url) return downloadToMedia(item.url, prefix);
   throw new Error('渠道返回的图片没有可用的 b64_json 或 url');
