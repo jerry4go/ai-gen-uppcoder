@@ -172,13 +172,37 @@ function fetchTimeout(url, opts, ms) {
   return fetch(url, { ...(opts || {}), signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
-async function downloadToMedia(url, prefix) { try { // 到这里渠道已经生成好了文件，只是在下载，下载失败绝不能让外层重试整个生成调用。
-  const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 180000);
-  if (!res.ok) { const err = new Error('下载生成文件失败 HTTP ' + res.status); err.isHttpError = true; err.httpStatus = res.status; throw err; }
-  const mime = (res.headers.get('content-type') || '').split(';')[0].trim() || (prefix === 'video' ? 'video/mp4' : 'image/png');
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (!buf.length) throw new Error('下载到的文件为空');
-  return saveMediaBuffer(buf, mime, prefix); } catch (e) { e.doNotRetry = true; throw e; }
+async function downloadToMedia(url, prefix) {
+  // 注意：到这里渠道已经生成好了文件，只是在下载。下载失败时绝不能
+  // 让外层重试整个生成调用——那会让渠道侧再烧一次生成。下载错误
+  // 一律打上 doNotRetry 标记，外层重试循环会直接放过。
+  // 但下载本身是幂等的（文件已在渠道侧生成好，再拉一次不会多烧
+  // 一次生成），所以下载内部可以重试：2026-11-12 18:21 实测，视频
+  // 已在渠道侧生成好（3.3MB mp4 已落盘），取回时 Instabox 公网
+  // 代理瞬时抖动导致 fetch 失败，记录直接判失败、视频丢了。
+  // 传输层失败重试 3 次（间隔 10s / 20s）；渠道 HTTP 错误立即失败。
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 180000);
+      if (!res.ok) {
+        const err = new Error('下载生成文件失败 HTTP ' + res.status);
+        err.isHttpError = true; err.httpStatus = res.status; err.doNotRetry = true;
+        throw err;
+      }
+      const mime = (res.headers.get('content-type') || '').split(';')[0].trim() || (prefix === 'video' ? 'video/mp4' : 'image/png');
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length) throw new Error('下载到的文件为空');
+      return saveMediaBuffer(buf, mime, prefix);
+    } catch (e) {
+      lastErr = e;
+      if (isHttpError(e) || !isTransportError(e) || attempt >= 3) break;
+      console.error('download attempt ' + attempt + ' failed, retrying:', e.message);
+      await sleep(attempt === 1 ? 10000 : 20000);
+    }
+  }
+  if (lastErr && typeof lastErr === 'object') lastErr.doNotRetry = true;
+  throw lastErr;
 }
 function dataUrlToBuffer(dataUrl) {
   const m = String(dataUrl || '').match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
@@ -291,6 +315,13 @@ async function pollImageTask(channel, taskId) {
     try {
       res = await fetchTimeout(channel.baseUrl + '/images/tasks/' + encodeURIComponent(taskId), { headers }, IMAGE_TASK_POLL_TIMEOUT_MS);
     } catch (e) {
+      // 轮询只是查询已建好的任务，失败绝不能让外层重发生成调用。
+      // 2026-11-12 补充：单次轮询遇到传输层抖动时继续轮询（任务还
+      // 在渠道侧跑着），而不是直接判失败；只有非传输层错误才抛出。
+      if (isTransportError(e)) {
+        console.error('image poll attempt ' + attempt + ' transport error, continuing:', e.message);
+        continue;
+      }
       if (e && typeof e === 'object') e.doNotRetry = true;
       throw e;
     }
@@ -405,17 +436,51 @@ async function generateVideo(channel, body) {
     if (direct) return downloadToMedia(resolveChannelUrl(channel, direct), 'video');
     throw new Error('渠道没有返回视频任务 ID');
   }
-  // 轮询：最多约 5 分钟
+  // 轮询：最多约 5 分钟。轮询只是查询已建好的任务，不是重试；但轮询
+  // 或取回步骤一旦失败，任务 ID 已存在，外层绝不能重发创建调用
+  // （会建重复任务），所以这里的错误一律打上 doNotRetry。
+  // 2026-11-12 补充：轮询本身是幂等的，单次轮询请求遇到传输层抖动
+  // （如 Instabox 代理瞬时断开）时不应直接判整个生成失败——任务还
+  // 在渠道侧跑着，继续轮询就能等到它完成；只有渠道 HTTP 错误、
+  // 任务明确 failed/cancelled、或轮询预算耗尽才失败。
   for (let attempt = 0; attempt < 120; attempt++) {
     await new Promise(r => setTimeout(r, 2500));
-    let res; try { res = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId), { headers }, 20000); } catch (e) { e.doNotRetry = true; throw e; }
+    let res;
+    try {
+      res = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId), { headers }, 20000);
+    } catch (e) {
+      if (isTransportError(e)) {
+        console.error('video poll attempt ' + attempt + ' transport error, continuing:', e.message);
+        continue;
+      }
+      if (e && typeof e === 'object') e.doNotRetry = true;
+      throw e;
+    }
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
     const data = (json && json.data) || json || {};
     const url = videoUrlFrom(data);
     if (url) return downloadToMedia(resolveChannelUrl(channel, url), 'video');
     if (data.status === 'completed') {
-      let contentRes; try { contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 120000); } catch (e) { e.doNotRetry = true; throw e; }
+      // 取回文件：传输层失败时重试 3 次（间隔 10s / 20s），文件已在
+      // 渠道侧生成好，重拉不会多烧一次生成；HTTP 错误立即失败。
+      let contentRes = null;
+      let contentErr = null;
+      for (let cAttempt = 1; cAttempt <= 3; cAttempt++) {
+        try {
+          contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 120000);
+          break;
+        } catch (e) {
+          contentErr = e;
+          if (!isTransportError(e) || cAttempt >= 3) break;
+          console.error('video content fetch attempt ' + cAttempt + ' failed, retrying:', e.message);
+          await sleep(cAttempt === 1 ? 10000 : 20000);
+        }
+      }
+      if (!contentRes) {
+        if (contentErr && typeof contentErr === 'object') contentErr.doNotRetry = true;
+        throw contentErr;
+      }
       if (!contentRes.ok) { const err = new Error('视频已完成但取回文件失败 HTTP ' + contentRes.status); err.isHttpError = true; err.httpStatus = contentRes.status; err.doNotRetry = true; throw err; }
       const buf = Buffer.from(await contentRes.arrayBuffer());
       return saveMediaBuffer(buf, 'video/mp4', 'video');
