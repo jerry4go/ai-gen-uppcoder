@@ -91,38 +91,64 @@ $('ref-file').addEventListener('change', (e) => {
 $('btn-clear-ref').addEventListener('click', () => { refDataUrl = ''; refSourceId = ''; $('ref-file').value = ''; renderRef(); });
 $('btn-clear-prompt').addEventListener('click', () => { $('prompt').value = ''; });
 
+let pollTimer = null;
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+// 轮询生成记录：只要还有 status='generating' 的记录就每 2.5 秒刷新一次，
+// 直到全部翻转为 completed / failed 才停。失败只以服务端记录为准，绝不提前报失败。
+async function pollUntilDone(onDone) {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    const { data } = await apiJson('/api/generations');
+    const list = data.ok ? data.generations : [];
+    await loadResults(list);
+    if (!list.some((g) => g.status === 'generating')) {
+      stopPolling();
+      const btn = $('btn-generate');
+      btn.disabled = false;
+      const latest = list[0];
+      if (latest && latest.status === 'failed') setStatus($('gen-status'), '生成失败：' + (latest.error || '未知错误'), true);
+      else if (latest) setStatus($('gen-status'), '已生成结果');
+      if (onDone) onDone(list);
+    }
+  }, 2500);
+}
+
 $('btn-generate').addEventListener('click', async () => {
   const prompt = $('prompt').value.trim();
   if (!prompt) { setStatus($('gen-status'), '请先输入提示词', true); return; }
   const btn = $('btn-generate');
   btn.disabled = true;
-  setStatus($('gen-status'), genType === 'video' ? '视频生成中（模型那边生成需要时间，请稍等）…' : '图片生成中…');
+  setStatus($('gen-status'), '生成中（模型那边还在生成，请稍等）…');
   try {
     const body = { type: genType, prompt, channelId: $('gen-channel').value || undefined };
     if (genType === 'image') { body.size = $('img-size').value; body.count = $('img-count').value; if ($('gen-model').value) body.imageModel = $('gen-model').value; }
     else { body.seconds = $('vid-seconds').value; body.size = $('vid-size').value; if ($('gen-model').value) body.videoModel = $('gen-model').value; if (refDataUrl) body.referenceImage = refDataUrl; if (refSourceId) body.sourceGenerationId = refSourceId; }
     const { data } = await apiJson('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!data.ok) { setStatus($('gen-status'), '生成失败：' + (data.error || '未知错误'), true); }
-    else { setStatus($('gen-status'), `已生成 ${data.generations.length} 个结果`); }
-    await loadResults();
-  } catch (e) { setStatus($('gen-status'), '生成失败：' + e.message, true); }
-  btn.disabled = false;
+    if (!data.ok) { setStatus($('gen-status'), '生成失败：' + (data.error || '未知错误'), true); btn.disabled = false; }
+    else {
+      setStatus($('gen-status'), '生成中（模型那边还在生成，请稍等）…');
+      await loadResults();
+      pollUntilDone();
+    }
+  } catch (e) { setStatus($('gen-status'), '生成失败：' + e.message, true); btn.disabled = false; }
 });
 
-async function loadResults() {
-  const { data } = await apiJson('/api/generations');
+async function loadResults(preloaded) {
+  const data = preloaded ? { ok: true, generations: preloaded } : (await apiJson('/api/generations')).data;
   const list = data.ok ? data.generations : [];
   $('result-count').textContent = list.length ? `共 ${list.length} 条` : '';
   $('empty-state').hidden = list.length > 0;
   $('results').innerHTML = list.map((g) => {
-    const mediaHtml = g.type === 'video'
+    const mediaHtml = g.status === 'generating'
+      ? `<div style="padding:40px;text-align:center;color:#666">⏳ 生成中（模型那边还在生成，请稍等）…</div>`
+      : g.type === 'video'
       ? `<video src="${media(g.url)}" controls preload="metadata"></video>`
       : (g.url ? `<img src="${media(g.url)}" alt="">` : `<div style="padding:40px;text-align:center;color:#999">图片已失效</div>`);
-    const extra = g.type === 'image' ? `<button class="btn" data-act="to-video" data-id="${g.id}">🎬 用这张图生成视频</button><button class="btn" data-act="edit-prompt" data-id="${g.id}">✏️ 编辑提示词</button>` : '';
+    const extra = g.type === 'image' && g.status !== 'generating' ? `<button class="btn" data-act="to-video" data-id="${g.id}">🎬 用这张图生成视频</button><button class="btn" data-act="edit-prompt" data-id="${g.id}">✏️ 编辑提示词</button>` : '';
     return `<div class="result">${mediaHtml}<div class="meta">
       <p><b>${g.type === 'video' ? '视频' : '图片'}</b> · ${esc(g.channelName || '')} · ${esc(g.model || '')}</p>
       <p>${esc(g.prompt || '')}</p>
-      <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
+      <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'generating' ? '· 生成中…' : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
       </div><div class="actions">${extra}
       ${g.url ? `<a class="btn" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
       <button class="btn danger" data-act="delete" data-id="${g.id}">删除</button>
@@ -146,6 +172,12 @@ async function loadResults() {
       }
     });
   });
+  // 刷新后仍有未完成的生成（例如刷新页面时后台还在生成），继续轮询直到它完成
+  if (list.some((g) => g.status === 'generating') && !pollTimer) {
+    $('btn-generate').disabled = true;
+    setStatus($('gen-status'), '生成中（模型那边还在生成，请稍等）…');
+    pollUntilDone();
+  }
 }
 async function deleteResult(id) {
   if (!confirm('确定删除这条生成记录吗？文件也会一起删掉。')) return;
@@ -216,11 +248,13 @@ async function loadAdminChannels() {
   document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
     const c = list.find((x) => x.id === b.dataset.edit); if (!c) return;
     $('ch-id').value = c.id; $('ch-name').value = c.name; $('ch-base').value = c.baseUrl; $('ch-key').value = '';
-    $('ch-img-model').value = c.imageModel || ''; $('ch-vid-model').value = c.videoModel || '';
     $('ch-cap-image').checked = (c.capabilities || []).includes('image');
     $('ch-cap-video').checked = (c.capabilities || []).includes('video');
     $('ch-enabled').checked = c.enabled; $('ch-default').checked = !!c.isDefault;
     $('channel-form-title').textContent = '编辑渠道：' + c.name;
+    // 编辑时用已保存的 Key 自动拉一次模型列表，下拉框里回填已选的模型
+    fetchedModels = []; fillModelSelects();
+    fetchModelsForForm({ imageModel: c.imageModel, videoModel: c.videoModel });
     window.scrollTo({ top: document.querySelector('#channel-form-title').offsetTop, behavior: 'smooth' });
   }));
   document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
@@ -234,21 +268,63 @@ async function loadAdminChannels() {
     await loadAdminChannels(); await loadChannels();
   }));
 }
+// ---------- 渠道表单：模型只能从 /models 返回的列表里下拉选择，不能手填 ----------
+let fetchedModels = [];
+function fillModelSelects(preset) {
+  const imgSel = $('ch-img-model'); const vidSel = $('ch-vid-model');
+  const imgVal = (preset && preset.imageModel) || imgSel.value;
+  const vidVal = (preset && preset.videoModel) || vidSel.value;
+  const opts = '<option value="">— 请选择 —</option>' + fetchedModels.map((m) => `<option>${esc(m)}</option>`).join('');
+  imgSel.innerHTML = opts; vidSel.innerHTML = opts;
+  imgSel.disabled = !fetchedModels.length; vidSel.disabled = !fetchedModels.length;
+  if (imgVal && fetchedModels.includes(imgVal)) imgSel.value = imgVal;
+  if (vidVal && fetchedModels.includes(vidVal)) vidSel.value = vidVal;
+}
+async function fetchModelsForForm(preset) {
+  // preset: 编辑已有渠道时，预先选中的生图/生视频模型（获取成功后回填）
+  const id = $('ch-id').value;
+  const body = id ? { channelId: id } : { baseUrl: $('ch-base').value.trim(), apiKey: $('ch-key').value.trim() };
+  if (!id && (!body.baseUrl || !body.apiKey)) { setStatus($('model-fetch-status'), '请先填 Base URL 和 API Key', true); return false; }
+  setStatus($('model-fetch-status'), '获取模型列表中…');
+  const { data } = await apiJson('/api/admin/models', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+  if (!data.ok) {
+    fetchedModels = []; fillModelSelects();
+    setStatus($('model-fetch-status'), '获取失败：' + (data.error || '未知错误'), true);
+    return false;
+  }
+  if (!data.models || !data.models.length) {
+    fetchedModels = []; fillModelSelects();
+    setStatus($('model-fetch-status'), '渠道没有返回任何模型，请检查 Base URL / Key，模型下拉框保持禁用', true);
+    return false;
+  }
+  fetchedModels = data.models;
+  fillModelSelects(preset);
+  setStatus($('model-fetch-status'), `已获取 ${data.total} 个模型，请在下拉框里选生图 / 生视频模型`);
+  return true;
+}
+$('btn-fetch-models').addEventListener('click', () => fetchModelsForForm(null));
+
 $('btn-save-channel').addEventListener('click', async () => {
   const id = $('ch-id').value;
-  const body = { name: $('ch-name').value.trim(), baseUrl: $('ch-base').value.trim(), apiKey: $('ch-key').value.trim(), imageModel: $('ch-img-model').value.trim(), videoModel: $('ch-vid-model').value.trim(), capabilities: [...($('ch-cap-image').checked ? ['image'] : []), ...($('ch-cap-video').checked ? ['video'] : [])], enabled: $('ch-enabled').checked, isDefault: $('ch-default').checked };
+  const body = { name: $('ch-name').value.trim(), baseUrl: $('ch-base').value.trim(), apiKey: $('ch-key').value.trim(), imageModel: $('ch-img-model').value, videoModel: $('ch-vid-model').value, capabilities: [...($('ch-cap-image').checked ? ['image'] : []), ...($('ch-cap-video').checked ? ['video'] : [])], enabled: $('ch-enabled').checked, isDefault: $('ch-default').checked };
   if (!id && !body.apiKey) { setStatus($('channel-status'), '请填写 API Key', true); return; }
   if (id && !body.apiKey) delete body.apiKey;
+  // 模型只能从“获取模型列表”返回的下拉选项里选，不能手填、不能留空蒙过去
+  if (!fetchedModels.length) { setStatus($('channel-status'), '请先点“获取模型列表”，从返回的模型里下拉选择', true); return; }
+  if (body.capabilities.includes('image') && (!body.imageModel || !fetchedModels.includes(body.imageModel))) { setStatus($('channel-status'), '请在生图模型下拉框里选一个模型', true); return; }
+  if (body.capabilities.includes('video') && body.videoModel && !fetchedModels.includes(body.videoModel)) { setStatus($('channel-status'), '生视频模型只能从下拉框里选', true); return; }
   const path = id ? '/api/admin/channels/' + encodeURIComponent(id) : '/api/admin/channels';
   const { data } = await apiJson(path, { method: id ? 'PUT' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
   if (!data.ok) { setStatus($('channel-status'), data.error || '保存失败', true); return; }
   setStatus($('channel-status'), '已保存');
-  $('ch-id').value = ''; $('ch-name').value = ''; $('ch-base').value = ''; $('ch-key').value = ''; $('ch-img-model').value = ''; $('ch-vid-model').value = '';
+  $('ch-id').value = ''; $('ch-name').value = ''; $('ch-base').value = ''; $('ch-key').value = '';
+  fetchedModels = []; fillModelSelects(); setStatus($('model-fetch-status'), '');
   $('channel-form-title').textContent = '添加渠道';
   await loadAdminChannels(); await loadChannels();
 });
 $('btn-cancel-channel').addEventListener('click', () => {
-  $('ch-id').value = ''; $('ch-name').value = ''; $('ch-base').value = ''; $('ch-key').value = ''; $('ch-img-model').value = ''; $('ch-vid-model').value = '';
+  $('ch-id').value = ''; $('ch-name').value = ''; $('ch-base').value = ''; $('ch-key').value = '';
+  fetchedModels = []; fillModelSelects(); setStatus($('model-fetch-status'), '');
   $('channel-form-title').textContent = '添加渠道';
 });
 

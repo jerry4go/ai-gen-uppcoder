@@ -95,7 +95,7 @@
     <div id="admin-main" hidden>
       <div class="card">
         <h2>模型渠道 <span id="channel-count" class="muted"></span></h2>
-        <p class="hint">渠道是 OpenAI 兼容接口：填 Base URL（不带末尾 /）、API Key、生图模型 / 生视频模型。Key 只存在服务器 ./data/channels.json，前台和列表里只显示掩码。生成走服务器代理，结果下载后存在服务器 ./data/media/。</p>
+        <p class="hint">渠道是 OpenAI 兼容接口：填 Base URL（不带末尾 /）、API Key，点“获取模型列表”后从返回的模型里下拉选择生图模型 / 生视频模型（不能手填）。Key 只存在服务器 ./data/channels.json，前台和列表里只显示掩码。生成走服务器代理，结果下载后存在服务器 ./data/media/。</p>
         <div id="channel-list"></div>
       </div>
       <div class="card">
@@ -105,8 +105,13 @@
           <label>名称 <input id="ch-name" placeholder="例如：我的生图渠道"></label>
           <label>Base URL <input id="ch-base" placeholder="https://api.example.com/v1"></label>
           <label>API Key <input id="ch-key" type="password" placeholder="sk-…（编辑时留空表示不改）" autocomplete="off"></label>
-          <label>生图模型 <input id="ch-img-model" placeholder="例如：gpt-image-1"></label>
-          <label>生视频模型 <input id="ch-vid-model" placeholder="例如：sora-2 / veo-3（没有就留空）"></label>
+          <label>生图模型 <select id="ch-img-model" disabled><option value="">先填 Base URL 和 API Key，再点下方“获取模型列表”</option></select></label>
+          <label>生视频模型 <select id="ch-vid-model" disabled><option value="">先填 Base URL 和 API Key，再点下方“获取模型列表”</option></select></label>
+          <div class="row">
+            <button class="btn" id="btn-fetch-models" type="button">🔍 获取模型列表</button>
+            <span id="model-fetch-status" class="status"></span>
+          </div>
+          <p class="hint">模型不能手填：点“获取模型列表”后，从渠道 /models 接口返回的模型里下拉选择。没返回模型或获取失败时，下拉框保持禁用。</p>
           <div class="row">
             <label><input type="checkbox" id="ch-cap-image" checked> 生图</label>
             <label><input type="checkbox" id="ch-cap-video"> 生视频</label>
