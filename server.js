@@ -166,10 +166,18 @@ function saveMediaBuffer(buf, mime, prefix) {
   return { fileName, url: mediaUrlFor(fileName), bytes: buf.length, mimeType: mime || 'application/octet-stream' };
 }
 
+// Cloudflare 命名隧道走代理（proxied）时，Browser Integrity Check 会
+// 拦截非浏览器 User-Agent（如 Node 默认的 "node"、Python-urllib），
+// 返回 403 error 1010。所有渠道请求统一带一个浏览器 UA。
+const BROWSER_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 function fetchTimeout(url, opts, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms || 20000);
-  return fetch(url, { ...(opts || {}), signal: ctrl.signal }).finally(() => clearTimeout(t));
+  const o = { ...(opts || {}) };
+  const h = { ...(o.headers || {}) };
+  if (!Object.keys(h).some(k => k.toLowerCase() === 'user-agent')) h['User-Agent'] = BROWSER_UA;
+  o.headers = h;
+    return fetch(url, { ...o, signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
 async function downloadToMedia(url, prefix) {
@@ -184,7 +192,7 @@ async function downloadToMedia(url, prefix) {
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 180000);
+      const res = await fetchTimeout(url, {}, 180000);
       if (!res.ok) {
         const err = new Error('下载生成文件失败 HTTP ' + res.status);
         err.isHttpError = true; err.httpStatus = res.status; err.doNotRetry = true;
