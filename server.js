@@ -120,6 +120,20 @@ function pickChannel(channelId, kind) {
 // ---------- 生成记录 ----------
 let generations = loadJson('generations.json', []);
 if (!Array.isArray(generations)) generations = [];
+// 服务启动时：所有还停在 'generating' 的记录，其后台任务已随旧进程消失，
+// 不会再完成（重启后没有任何任务能活下来，15 分钟以内的也一样）。
+// 直接标记为失败并写明原因，避免前台一直轮询等一个永远不会来的结果。
+{
+  let stale = 0;
+  for (const g of generations) {
+    if (g.status === 'generating') {
+      g.status = 'failed'; g.note = '';
+      g.error = '服务重启/重新部署导致该生成被中断（后台任务已不存在），请重新生成';
+      stale++;
+    }
+  }
+  if (stale) { saveJson('generations.json', generations); console.log('已标记 ' + stale + ' 条重启前未完成的生成记录为失败'); }
+}
 function saveGeneration(g) {
   generations.unshift(g);
   generations = generations.slice(0, 100);
@@ -197,6 +211,25 @@ function channelErrorText(status, text) {
   return '渠道返回 HTTP ' + status + ': ' + String(text || '').slice(0, 300);
 }
 
+// ---------- 可重试错误与重试策略 ----------
+// 渠道（尤其 muse2api）常在生成中途返回 502/503/504，或连接被断开，
+// 而图片实际稍后会在渠道侧生成好。把这些当作“暂时失败”重试整个调用，
+// 而不是立刻记失败丢结果。401/403/404/400 等是配置问题，不重试。
+// 注意：/images/generations 是纯同步接口，没有任务 ID 可供事后查询，
+// 所以断开后唯一的恢复办法就是重新发起一次 POST（见后台任务的重试循环）。
+const MAX_GENERATION_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [10000, 30000]; // 第 1 次失败后等 10 秒，第 2 次后等 30 秒
+const IMAGE_TIMEOUT_MS = 600000; // 生图单次调用 10 分钟
+const VIDEO_CREATE_TIMEOUT_MS = 300000; // 生视频建任务 5 分钟
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function isRetryableError(e) {
+  const msg = String((e && e.message) || e || '');
+  if (e && e.name === 'AbortError') return true;
+  if (/HTTP (502|503|504|429)/.test(msg)) return true;
+  if (/aborted|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|disconnected|unavailable|timed out/i.test(msg)) return true;
+  return false;
+}
+
 // ---------- 生图 ----------
 async function generateImage(channel, body) {
   const prompt = String(body.prompt || '').trim();
@@ -213,7 +246,7 @@ async function generateImage(channel, body) {
       { model, prompt, size, n: '1' },
       [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
     );
-    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, 300000);
+    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TIMEOUT_MS);
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
     const item = json && json.data && json.data[0];
@@ -224,7 +257,7 @@ async function generateImage(channel, body) {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt, size, n: count }),
-    }, 300000);
+    }, IMAGE_TIMEOUT_MS);
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
     const items = (json && json.data) || [];
@@ -269,7 +302,7 @@ async function generateVideo(channel, body) {
     fields.mode = 'frames';
   }
   const { body: mpBody, contentType } = buildMultipart(fields, files);
-  const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, 120000);
+  const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, VIDEO_CREATE_TIMEOUT_MS);
   const created = await readJsonResponse(createdRes);
   if (!createdRes.ok) throw new Error(channelErrorText(createdRes.status, (created.json && (created.json.error && created.json.error.message)) || created.text));
   const createdData = (created.json && created.json.data) || created.json || {};
@@ -381,35 +414,60 @@ const server = http.createServer(async (req, res) => {
           pending.push(saveGeneration({
             id: newId(), type, prompt, channelId: channel.id, channelName: channel.name, model,
             status: 'generating', url: '', fileName: '', bytes: 0, mimeType: '',
-            source, createdAt: nowIso(),
+            source, createdAt: nowIso(), note: '', retryCount: 0,
           }));
         }
-        // 后台任务：绝不让异常崩掉服务，失败只写回记录
+        // 后台任务：与 POST 响应完全脱离（请求立即返回，任务在后台跑，
+        // 不受任何请求超时影响）。失败只写回记录，绝不崩掉服务。
+        // 可重试错误（渠道 502/503/504/429、超时、连接被断开）不立刻记失败：
+        // 渠道侧常在断开后仍把图生成好，重试整个调用是唯一的恢复办法
+        // （/images/generations 是纯同步接口，没有任务 ID 可供事后查询），
+        // 所以最多重试 3 次（间隔 10 秒、30 秒），记录保持 generating，
+        // 并把重试进度写进 note，前台轮询时能看到。
         const channelSnapshot = { ...channel };
         const jobBody = { ...body };
         (async () => {
-          try {
-            const items = type === 'video'
-              ? [await generateVideo(channelSnapshot, { ...jobBody, videoModel: model })]
-              : await generateImage(channelSnapshot, { ...jobBody, imageModel: model });
+          let items = null;
+          let lastErr = null;
+          for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+            try {
+              items = type === 'video'
+                ? [await generateVideo(channelSnapshot, { ...jobBody, videoModel: model })]
+                : await generateImage(channelSnapshot, { ...jobBody, imageModel: model });
+              break;
+            } catch (e) {
+              lastErr = e;
+              console.error('generate attempt ' + attempt + ' failed:', e.message);
+              if (!isRetryableError(e) || attempt >= MAX_GENERATION_ATTEMPTS) break;
+              const waitMs = RETRY_BACKOFF_MS[attempt - 1] || 30000;
+              const note = '渠道暂时不可用，正在重试（第 ' + attempt + '/' + MAX_GENERATION_ATTEMPTS + ' 次，' + (waitMs / 1000) + ' 秒后重试）…';
+              pending.forEach(p => updateGeneration(p.id, { status: 'generating', note, retryCount: attempt }));
+              await sleep(waitMs);
+            }
+          }
+          if (items) {
             items.forEach((it, i) => {
               if (i < pending.length) {
-                updateGeneration(pending[i].id, { status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType });
+                updateGeneration(pending[i].id, { status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType, note: '' });
               } else {
-                saveGeneration({ id: newId(), type, prompt, channelId: channelSnapshot.id, channelName: channelSnapshot.name, model, status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType, source, createdAt: nowIso() });
+                saveGeneration({ id: newId(), type, prompt, channelId: channelSnapshot.id, channelName: channelSnapshot.name, model, status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType, source, createdAt: nowIso(), note: '', retryCount: 0 });
               }
             });
             // 渠道返回的张数比预期少时，多余的 pending 记录标记失败，避免一直转圈
             for (let i = items.length; i < pending.length; i++) {
-              updateGeneration(pending[i].id, { status: 'failed', error: '渠道只返回了 ' + items.length + ' 张图片' });
+              updateGeneration(pending[i].id, { status: 'failed', note: '', error: '渠道只返回了 ' + items.length + ' 张图片' });
             }
-          } catch (e) {
-            console.error('generate failed:', e.message);
-            const friendly = e.message === 'fetch failed' || (e.message && e.message.includes('aborted'))
-              ? ('无法连接渠道 ' + channelSnapshot.baseUrl + '，请检查 Base URL 是否正确、网络是否通、Key 是否有效')
-              : (e.message || '生成失败');
-            pending.forEach(p => updateGeneration(p.id, { status: 'failed', error: friendly }));
+            return;
           }
+          const e = lastErr;
+          const friendly = e && (e.message === 'fetch failed' || (e.message && e.message.includes('aborted')))
+            ? ('无法连接渠道 ' + channelSnapshot.baseUrl + '，请检查 Base URL 是否正确、网络是否通、Key 是否有效')
+            : ((e && e.message) || '生成失败');
+          const retried = isRetryableError(e);
+          const errText = retried
+            ? ('重试 ' + MAX_GENERATION_ATTEMPTS + ' 次后仍失败：' + friendly)
+            : friendly;
+          pending.forEach(p => updateGeneration(p.id, { status: 'failed', note: '', error: errText }));
         })();
         return sendJson(res, 200, { ok: true, type, generations: pending.map(g => ({ ...g, fileName: undefined })) });
       }
