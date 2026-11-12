@@ -90,6 +90,23 @@ function publicChannelForFront(c) {
   // 前台只需要知道名字、模型和能力，绝不返回 Key（哪怕是掩码以外的任何形式）
   return { id: c.id, name: c.name, imageModel: c.imageModel || '', videoModel: c.videoModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault };
 }
+// 模型只能从渠道 /models 返回的列表里选：保存渠道时先拉一次 /models 校验，
+// 填的模型不在列表里就拒绝；拉不到列表也拒绝（不能靠手填蒙过去）。
+async function validateModelsAgainstChannel(baseUrl, apiKey, imageModel, videoModel) {
+  let models;
+  try {
+    const r = await fetchTimeout(baseUrl + '/models', { headers: { Authorization: 'Bearer ' + apiKey } }, 15000);
+    const { json, text } = await readJsonResponse(r);
+    if (!r.ok) return '无法获取模型列表：' + channelErrorText(r.status, (json && (json.error && json.error.message)) || text);
+    models = ((json && json.data) || []).map(m => (typeof m === 'string' ? m : m.id || '')).filter(Boolean);
+  } catch (e) {
+    return '无法获取模型列表：' + e.message;
+  }
+  if (!models.length) return '渠道没有返回任何模型，请检查 Base URL / Key';
+  if (imageModel && !models.includes(imageModel)) return '生图模型 ' + imageModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';
+  if (videoModel && !models.includes(videoModel)) return '生视频模型 ' + videoModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';
+  return null;
+}
 function pickChannel(channelId, kind) {
   const list = channels.filter(c => c.enabled !== false && (c.capabilities || []).includes(kind));
   if (!list.length) return null;
@@ -106,6 +123,14 @@ if (!Array.isArray(generations)) generations = [];
 function saveGeneration(g) {
   generations.unshift(g);
   generations = generations.slice(0, 100);
+  saveJson('generations.json', generations);
+  return g;
+}
+// 更新一条已存在的生成记录（异步生成任务用：先建 pending 记录，后台完成后再填结果）
+function updateGeneration(id, patch) {
+  const g = generations.find(x => x.id === id);
+  if (!g) return null;
+  Object.assign(g, patch);
   saveJson('generations.json', generations);
   return g;
 }
@@ -134,7 +159,7 @@ function fetchTimeout(url, opts, ms) {
 }
 
 async function downloadToMedia(url, prefix) {
-  const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 60000);
+  const res = await fetchTimeout(url, { headers: { 'User-Agent': 'ai-gen-uppcoder/1.0' } }, 180000);
   if (!res.ok) throw new Error('下载生成文件失败 HTTP ' + res.status);
   const mime = (res.headers.get('content-type') || '').split(';')[0].trim() || (prefix === 'video' ? 'video/mp4' : 'image/png');
   const buf = Buffer.from(await res.arrayBuffer());
@@ -188,7 +213,7 @@ async function generateImage(channel, body) {
       { model, prompt, size, n: '1' },
       [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
     );
-    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody });
+    const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, 300000);
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
     const item = json && json.data && json.data[0];
@@ -199,7 +224,7 @@ async function generateImage(channel, body) {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt, size, n: count }),
-    });
+    }, 300000);
     const { json, text } = await readJsonResponse(res);
     if (!res.ok) throw new Error(channelErrorText(res.status, (json && (json.error && json.error.message)) || text));
     const items = (json && json.data) || [];
@@ -244,7 +269,7 @@ async function generateVideo(channel, body) {
     fields.mode = 'frames';
   }
   const { body: mpBody, contentType } = buildMultipart(fields, files);
-  const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody });
+  const createdRes = await fetchTimeout(channel.baseUrl + '/videos', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, 120000);
   const created = await readJsonResponse(createdRes);
   if (!createdRes.ok) throw new Error(channelErrorText(createdRes.status, (created.json && (created.json.error && created.json.error.message)) || created.text));
   const createdData = (created.json && created.json.data) || created.json || {};
@@ -265,7 +290,7 @@ async function generateVideo(channel, body) {
     const url = videoUrlFrom(data);
     if (url) return downloadToMedia(url, 'video');
     if (data.status === 'completed') {
-      const contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 60000);
+      const contentRes = await fetchTimeout(channel.baseUrl + '/videos/' + encodeURIComponent(taskId) + '/content', { headers }, 120000);
       if (!contentRes.ok) throw new Error('视频已完成但取回文件失败 HTTP ' + contentRes.status);
       const buf = Buffer.from(await contentRes.arrayBuffer());
       return saveMediaBuffer(buf, 'video/mp4', 'video');
@@ -337,6 +362,10 @@ const server = http.createServer(async (req, res) => {
         return fs.createReadStream(full).pipe(res);
       }
       // POST /api/generate（前台生成：生图 / 生视频）
+      // 异步生成：渠道侧（尤其 muse2api 驱动 Muse 网页）一次生图常需 30-90 秒以上，
+      // 不能让请求一直等到渠道返回。先建 status='generating' 的记录并立即返回，
+      // 后台继续调渠道、下载文件、更新记录；前台轮询 /api/generations 直到记录翻转为
+      // completed / failed。这样即使渠道很慢也不会出现 "This operation was aborted"。
       if (method === 'POST' && pathname === '/api/generate') {
         const body = JSON.parse(await readBody(req) || '{}');
         const type = body.type === 'video' ? 'video' : 'image';
@@ -345,24 +374,44 @@ const server = http.createServer(async (req, res) => {
         const channel = pickChannel(body.channelId, type);
         if (!channel) return sendJson(res, 400, { ok: false, error: type === 'video' ? '没有可用的生视频渠道，请先在后台添加支持视频的渠道并填写 videoModel' : '没有可用的生图渠道，请先在后台添加渠道并填写 imageModel' });
         const model = type === 'video' ? (body.videoModel || channel.videoModel) : (body.imageModel || channel.imageModel);
-        try {
-          const items = type === 'video'
-            ? [await generateVideo(channel, { ...body, videoModel: model })]
-            : await generateImage(channel, { ...body, imageModel: model });
-          const made = items.map(it => saveGeneration({
+        const count = type === 'video' ? 1 : (body.referenceImage ? 1 : Math.min(4, Math.max(1, parseInt(body.count || '1', 10) || 1)));
+        const source = body.sourceGenerationId ? 'image-to-video' : (body.referenceImage ? 'reference-image' : 'text');
+        const pending = [];
+        for (let i = 0; i < count; i++) {
+          pending.push(saveGeneration({
             id: newId(), type, prompt, channelId: channel.id, channelName: channel.name, model,
-            status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType,
-            source: body.sourceGenerationId ? 'image-to-video' : (body.referenceImage ? 'reference-image' : 'text'), createdAt: nowIso(),
+            status: 'generating', url: '', fileName: '', bytes: 0, mimeType: '',
+            source, createdAt: nowIso(),
           }));
-          return sendJson(res, 200, { ok: true, type, generations: made.map(g => ({ ...g, fileName: undefined })) });
-        } catch (e) {
-          console.error('generate failed:', e.message);
-          const friendly = e.message === 'fetch failed'
-            ? ('无法连接渠道 ' + channel.baseUrl + '，请检查 Base URL 是否正确、网络是否通、Key 是否有效')
-            : (e.message || '生成失败');
-          saveGeneration({ id: newId(), type, prompt, channelId: channel.id, channelName: channel.name, model, status: 'failed', url: '', fileName: '', bytes: 0, mimeType: '', error: friendly, createdAt: nowIso() });
-          return sendJson(res, 502, { ok: false, error: friendly });
         }
+        // 后台任务：绝不让异常崩掉服务，失败只写回记录
+        const channelSnapshot = { ...channel };
+        const jobBody = { ...body };
+        (async () => {
+          try {
+            const items = type === 'video'
+              ? [await generateVideo(channelSnapshot, { ...jobBody, videoModel: model })]
+              : await generateImage(channelSnapshot, { ...jobBody, imageModel: model });
+            items.forEach((it, i) => {
+              if (i < pending.length) {
+                updateGeneration(pending[i].id, { status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType });
+              } else {
+                saveGeneration({ id: newId(), type, prompt, channelId: channelSnapshot.id, channelName: channelSnapshot.name, model, status: 'completed', url: it.url, fileName: it.fileName, bytes: it.bytes, mimeType: it.mimeType, source, createdAt: nowIso() });
+              }
+            });
+            // 渠道返回的张数比预期少时，多余的 pending 记录标记失败，避免一直转圈
+            for (let i = items.length; i < pending.length; i++) {
+              updateGeneration(pending[i].id, { status: 'failed', error: '渠道只返回了 ' + items.length + ' 张图片' });
+            }
+          } catch (e) {
+            console.error('generate failed:', e.message);
+            const friendly = e.message === 'fetch failed' || (e.message && e.message.includes('aborted'))
+              ? ('无法连接渠道 ' + channelSnapshot.baseUrl + '，请检查 Base URL 是否正确、网络是否通、Key 是否有效')
+              : (e.message || '生成失败');
+            pending.forEach(p => updateGeneration(p.id, { status: 'failed', error: friendly }));
+          }
+        })();
+        return sendJson(res, 200, { ok: true, type, generations: pending.map(g => ({ ...g, fileName: undefined })) });
       }
       // DELETE /api/generations/:id（删除一条记录及文件）
       if (method === 'DELETE' && pathname.startsWith('/api/generations/')) {
@@ -423,6 +472,9 @@ const server = http.createServer(async (req, res) => {
           }
           const caps = Array.isArray(body.capabilities) ? body.capabilities.filter(x => x === 'image' || x === 'video') : [];
           if (!caps.length) return sendJson(res, 400, { ok: false, error: '至少选一种能力：生图或生视频' });
+          if (caps.includes('image') && !String(body.imageModel || '').trim()) return sendJson(res, 400, { ok: false, error: '请先点“获取模型列表”，从下拉框里选一个生图模型' });
+          const modelErr = await validateModelsAgainstChannel(cleanBaseUrl(body.baseUrl), String(body.apiKey).trim(), String(body.imageModel || '').trim(), String(body.videoModel || '').trim());
+          if (modelErr) return sendJson(res, 400, { ok: false, error: modelErr });
           const c = { id: newId(), name: String(body.name).trim(), baseUrl: cleanBaseUrl(body.baseUrl), apiKey: String(body.apiKey).trim(), imageModel: String(body.imageModel || '').trim(), videoModel: String(body.videoModel || '').trim(), capabilities: caps, enabled: body.enabled !== false, isDefault: !!body.isDefault, createdAt: nowIso() };
           if (c.isDefault) channels.forEach(x => { x.isDefault = false; });
           channels.push(c); saveJson('channels.json', channels);
@@ -447,8 +499,39 @@ const server = http.createServer(async (req, res) => {
           if (Array.isArray(body.capabilities)) c.capabilities = body.capabilities.filter(x => x === 'image' || x === 'video');
           if (body.enabled !== undefined) c.enabled = !!body.enabled;
           if (body.isDefault) { channels.forEach(x => { x.isDefault = false; }); c.isDefault = true; }
+          // 改了模型时同样校验：模型必须在渠道 /models 返回的列表里
+          if (body.imageModel !== undefined || body.videoModel !== undefined || body.baseUrl !== undefined || (body.apiKey !== undefined && String(body.apiKey).trim() && !String(body.apiKey).startsWith('********'))) {
+            const modelErr = await validateModelsAgainstChannel(c.baseUrl, c.apiKey, c.imageModel, c.videoModel);
+            if (modelErr) return sendJson(res, 400, { ok: false, error: modelErr });
+          }
           saveJson('channels.json', channels);
           return sendJson(res, 200, { ok: true, channel: publicChannel(c) });
+        }
+        if (method === 'POST' && pathname === '/api/admin/models') {
+          // 取模型列表（供渠道表单的下拉框用）：传 channelId 用已保存的 Key，
+          // 传 baseUrl+apiKey 则用表单里刚填的 Key（不保存，只用来拉一次 /models）。
+          // 模型只能从这里返回的列表里选，不能手填。
+          if (!requireAdmin(req, res)) return;
+          const body = JSON.parse(await readBody(req) || '{}');
+          let baseUrl = '', apiKey = '';
+          if (body.channelId) {
+            const c = channels.find(x => x.id === body.channelId);
+            if (!c) return sendJson(res, 404, { ok: false, error: '渠道不存在' });
+            baseUrl = c.baseUrl; apiKey = c.apiKey;
+          } else {
+            baseUrl = cleanBaseUrl(body.baseUrl);
+            apiKey = String(body.apiKey || '').trim();
+            if (!baseUrl || !apiKey) return sendJson(res, 400, { ok: false, error: '请先填 Base URL 和 API Key' });
+          }
+          try {
+            const r = await fetchTimeout(baseUrl + '/models', { headers: { Authorization: 'Bearer ' + apiKey } }, 15000);
+            const { json, text } = await readJsonResponse(r);
+            if (!r.ok) return sendJson(res, 200, { ok: false, error: channelErrorText(r.status, (json && (json.error && json.error.message)) || text) });
+            const models = ((json && json.data) || []).map(m => (typeof m === 'string' ? m : m.id || '')).filter(Boolean);
+            return sendJson(res, 200, { ok: true, models: models.slice(0, 50), total: models.length });
+          } catch (e) {
+            return sendJson(res, 200, { ok: false, error: '连接失败：' + e.message });
+          }
         }
         if (method === 'POST' && pathname.startsWith('/api/admin/channels/') && pathname.endsWith('/test')) {
           if (!requireAdmin(req, res)) return;
