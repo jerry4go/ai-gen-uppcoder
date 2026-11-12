@@ -271,7 +271,7 @@ function inferVideoRatio(size) {
 // GET /v1/images/tasks/{id} 直到 completed/failed。
 function resolveChannelUrl(channel, url) {
   if (!url) return '';
-  if (/^https?:\/\/i.test(url)) return url;
+  if (/^https?:\/\//i.test(url)) return url;
   try { return new URL(url, channel.baseUrl.replace(/\/$/, '') + '/').toString(); } catch { return url; }
 }
 async function pollImageTask(channel, taskId) {
