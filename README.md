@@ -18,6 +18,8 @@
 - **异步生成，不会假报错**：点“生成”后服务端立即返回一条 `generating` 状态的记录，前台显示“生成中（模型那边还在生成，请稍等）…”并每 2.5 秒轮询，直到记录翻转为完成或失败才显示结果。渠道侧一次生图常需 30–90 秒以上（muse2api 驱动 Muse 网页），旧版 20 秒超时会误报 `This operation was aborted`，现在不会了；同时单次调用超时也已放宽（生图 600 秒、生视频创建 300 秒、下载 180 秒）。
 - **渠道 502/503/504、超时、连接断开会自动重试**：这类错误不立刻记失败——后台任务最多重试 3 次（间隔 10 秒、30 秒），记录保持 `generating` 并显示“渠道暂时不可用，正在重试（第 X/3 次）…”，3 次都失败才记失败并注明“重试 3 次后仍失败”。注意 `/images/generations` 是纯同步接口、没有任务 ID，断开后无法事后查询已生成好的图，唯一的恢复办法就是重新发起一次调用，所以重试的是整个生成调用。401/403/404/400 等配置类错误不重试。服务重启/重新部署时，之前还在 `generating` 的记录会被标记为失败并写明“被中断，请重新生成”，不会一直转圈。
 
+- **请求格式与原版 infinite-canvas 完全一致**：生图（`/images/generations`、`/images/edits`）都带 `response_format: "b64_json"` + `output_format: "png"`（gpt-image 模型按原版省略 response_format，它本来就返回 b64），图片以内联 base64 在同一次响应里返回，不走沙箱 URL 下载——不加 response_format 时 muse2api 返回的是沙箱服务上的 URL，后续下载会报 502 "The sandbox service disconnected or is unavailable."。生视频（`/videos`）按原版补齐 `ratio`（由尺寸推断，auto 时省略）、`resolution_name: "720p"`、`generate_audio: "true"`、`watermark: "false"`、`mode: "frames"`。  
+
 ## 部署到 Uppcoder（Spark 免费版）
 
 见 `README_UPPCODER.md`。要点：纯 Node.js、零依赖、无数据库，`node server.js`，端口 8000，`/app/` 子路径已处理。
