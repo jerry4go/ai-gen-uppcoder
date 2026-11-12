@@ -403,7 +403,13 @@ async function imageItemToMedia(item, prefix) {
 // ---------- 生视频 ----------
 function videoUrlFrom(data) {
   if (!data || typeof data !== 'object') return '';
-  return data.url || data.video_url || data.result_url || (data.content && (data.content.video_url || data.content.url)) || '';
+  // muse2api 的任务结果在 result.url 里（见 2026-11-12 实测：轮询返回
+  // {status:"completed", result:{url:"http://172.16.0.2:1314/v1/media/....mp4"}}）。
+  // 之前没查 result.url，永远走 /videos/{id}/content，而这版 muse2api
+  // 的 /content 直接 404，视频永远取不回来。先查 result.url，再查其它位置。
+  return (data.result && (data.result.url || data.result.video_url))
+    || data.url || data.video_url || data.result_url
+    || (data.content && (data.content.video_url || data.content.url)) || '';
 }
 async function generateVideo(channel, body) {
   const prompt = String(body.prompt || '').trim();
