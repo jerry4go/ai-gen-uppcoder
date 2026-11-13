@@ -300,7 +300,7 @@ async function loadResults(preloaded) {
       <p>${esc(g.prompt || '')}</p>
       <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'generating' ? '· ' + esc(g.note || '生成中…') : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
       </div><div class="actions">${extra}
-      ${g.url ? `<button class="btn save-photos" data-act="save-photos" data-id="${g.id}">📲 保存到相册</button><a class="btn" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
+      ${g.url ? `<button class="btn save-photos" data-act="save-photos" data-id="${g.id}">📲 保存到相册</button><a class="btn dl-desktop" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
       <button class="btn danger" data-act="delete" data-id="${g.id}">删除</button>
       </div></div>`;
   }).join('');
