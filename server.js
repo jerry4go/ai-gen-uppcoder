@@ -946,7 +946,8 @@ const server = http.createServer(async (req, res) => {
     if (fs.existsSync(full) && fs.statSync(full).isDirectory()) full = path.join(full, 'index.html');
     if (!fs.existsSync(full)) full = path.join(PUBLIC_DIR, 'index.html');
     const ext = path.extname(full).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+        // 静态资源不缓存：避免浏览器用旧的 style.css / app.js（主题切换点不动就是这么来的）
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     fs.createReadStream(full).pipe(res);
   } catch (e) {
     console.error(e);
