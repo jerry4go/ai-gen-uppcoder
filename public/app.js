@@ -154,6 +154,36 @@ $('lightbox').addEventListener('click', (e) => { if (e.target === $('lightbox'))
 $('lightbox-img').addEventListener('click', (e) => { e.stopPropagation(); $('lightbox-img').classList.toggle('zoomed'); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('lightbox').hidden) closeLightbox(); });
 
+// ---------- 保存到相册（手机） ----------
+// iOS 上点“下载”只会存到“文件”，进不了照片。改用系统分享（Web Share API）
+// 把文件发到分享面板，里面点“存储图像 / 存储视频”就直接进相册了。
+// 文件是现取的（视频要下载几 MB，点后稍等一下分享面板才会出来）。
+// 不支持分享的浏览器就回退到普通下载。
+async function shareToPhotos(g) {
+  const url = media(g.url);
+  const fileName = g.fileName || (g.url || '').split('/').pop() || 'media';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('下载失败');
+    const blob = await res.blob();
+    const file = new File([blob], fileName, { type: blob.type || (g.type === 'video' ? 'video/mp4' : 'image/png') });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file] });
+      return;
+    }
+    throw new Error('不支持分享');
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // 用户在分享面板点了取消，不算错
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setStatus($('gen-status'), '这个浏览器不支持直接存相册，已改用普通下载（会存到“文件”里）');
+  }
+}
+
 // ---------- 扩写提示词（文本模型） ----------
 // 文本模型只做纯文本扩写：把提示词框里的短提示词扩写成详细的生成提示词，
 // 填回框里，用户改好再点生成。渠道的文本接口是纯文本的，不支持看图，
@@ -270,7 +300,7 @@ async function loadResults(preloaded) {
       <p>${esc(g.prompt || '')}</p>
       <p class="muted">${esc(g.createdAt || '')} ${g.source ? '· ' + esc(g.source) : ''} ${g.status === 'generating' ? '· ' + esc(g.note || '生成中…') : ''} ${g.status === 'failed' ? '· 生成失败：' + esc(g.error || '') : ''}</p>
       </div><div class="actions">${extra}
-      ${g.url ? `<a class="btn" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
+      ${g.url ? `<button class="btn" data-act="save-photos" data-id="${g.id}">📲 保存到相册</button><a class="btn" href="${media(g.url)}" download>⬇️ 下载</a>` : ''}
       <button class="btn danger" data-act="delete" data-id="${g.id}">删除</button>
       </div></div>`;
   }).join('');
@@ -279,6 +309,7 @@ async function loadResults(preloaded) {
       const g = list.find((x) => x.id === b.dataset.id);
       if (!g) return;
       if (b.dataset.act === 'delete') { deleteResult(g.id); }
+      if (b.dataset.act === 'save-photos') { shareToPhotos(g); }
       if (b.dataset.act === 'edit-prompt') { $('prompt').value = g.prompt || ''; autoGrowPrompt(); $('prompt').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
       if (b.dataset.act === 'add-ref') {
         // 把这张生成图片加进参考图列表（换装等多张参考图时用）
