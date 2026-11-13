@@ -52,14 +52,15 @@
         <label><input type="checkbox" id="vid-watermark"> 水印</label>
         <span id="vid-size-show" class="muted"></span>
       </div>
-      <div class="row" id="ref-row" hidden>
-        <label class="btn ghost">📷 上传参考图（作视频首帧） <input type="file" id="ref-file" accept="image/*" hidden></label>
+      <div class="row" id="ref-row">
+        <label class="btn ghost">📷 上传参考图（最多 5 张，第一张作首帧 / 主参考图） <input type="file" id="ref-file" accept="image/*" multiple hidden></label>
         <span id="ref-name" class="muted"></span>
-        <button class="btn ghost" id="btn-clear-ref" hidden>移除参考图</button>
+        <button class="btn ghost" id="btn-clear-ref" hidden>清空参考图</button>
       </div>
       <div id="ref-preview"></div>
       <div class="row">
         <button class="btn primary" id="btn-generate">✨ 生成</button>
+        <button class="btn" id="btn-enhance">✍️ 扩写提示词</button>
         <button class="btn ghost" id="btn-clear-prompt">清空提示词</button>
         <span id="gen-status" class="status"></span>
       </div>
@@ -114,14 +115,16 @@
           <label>API Key <input id="ch-key" type="password" placeholder="sk-…（编辑时留空表示不改）" autocomplete="off"></label>
           <label>生图模型 <select id="ch-img-model" disabled><option value="">先填 Base URL 和 API Key，再点下方“获取模型列表”</option></select></label>
           <label>生视频模型 <select id="ch-vid-model" disabled><option value="">先填 Base URL 和 API Key，再点下方“获取模型列表”</option></select></label>
+          <label>文本模型 <select id="ch-text-model" disabled><option value="">先填 Base URL 和 API Key，再点下方“获取模型列表”</option></select></label>
           <div class="row">
             <button class="btn" id="btn-fetch-models" type="button">🔍 获取模型列表</button>
             <span id="model-fetch-status" class="status"></span>
           </div>
-          <p class="hint">模型不能手填：点“获取模型列表”后，从渠道 /models 接口返回的模型里下拉选择。没返回模型或获取失败时，下拉框保持禁用。</p>
+          <p class="hint">模型不能手填：点“获取模型列表”后，从渠道 /models 接口返回的模型里下拉选择。没返回模型或获取失败时，下拉框保持禁用。文本模型用于“扩写提示词”。</p>
           <div class="row">
             <label><input type="checkbox" id="ch-cap-image" checked> 生图</label>
             <label><input type="checkbox" id="ch-cap-video"> 生视频</label>
+            <label><input type="checkbox" id="ch-cap-text"> 文本（扩写提示词）</label>
             <label><input type="checkbox" id="ch-enabled" checked> 启用</label>
             <label><input type="checkbox" id="ch-default"> 设为默认渠道</label>
           </div>
