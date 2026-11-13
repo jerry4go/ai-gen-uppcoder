@@ -597,7 +597,10 @@ async function generateVideo(channel, body) {
 // ---------- HTTP 工具 ----------
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  // API 一律不缓存：否则 CDN（EdgeOne / Cloudflare 等）会把 /api/generations
+  // 这类 GET 接口缓存起来，前端轮询拿到的是旧列表——生成完了显示“已生成结果”，
+  // 但结果列表里却没有新内容。必须让所有 CDN 和浏览器都不缓存 API。
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(body);
 }
 function readBody(req, maxBytes) {
