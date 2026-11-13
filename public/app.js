@@ -7,8 +7,10 @@ const $ = (id) => document.getElementById(id);
 let genType = 'image';
 let channels = [];
 let token = localStorage.getItem('ai-gen-token') || '';
-let refDataUrl = '';
-let refSourceId = ''; // 图生视频时：已生成图片的记录 id
+// 参考图（多张，用于换装等场景）：按用户选择的顺序排，第一张作首帧 / 主参考图。
+// 每项是 {key, kind:'upload'|'generation', label, dataUrl?, generationId?}。
+const MAX_REFS = 5;
+let refItems = [];
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 async function apiJson(path, opts) {
@@ -71,25 +73,71 @@ document.querySelectorAll('#type-seg button').forEach((b) => {
     genType = b.dataset.type;
     $('image-opts').hidden = genType !== 'image';
     $('video-opts').hidden = genType !== 'video';
-    $('ref-row').hidden = genType !== 'video';
-    if (genType !== 'video') { refDataUrl = ''; refSourceId = ''; renderRef(); }
+    // 参考图行生图和生视频都用（换装等多张参考图），切换类型时不再清空
     refreshModels();
   });
 });
+function refThumb(item) {
+  if (item.kind === 'upload') return item.dataUrl || '';
+  return media('/api/media/' + encodeURIComponent(item.fileName || ''));
+}
 function renderRef() {
-  $('ref-name').textContent = refDataUrl ? '已选择参考图' : (refSourceId ? '已用生成图片作首帧' : '');
-  $('btn-clear-ref').hidden = !refDataUrl && !refSourceId;
-  $('ref-preview').innerHTML = refDataUrl ? `<img src="${refDataUrl}" alt="参考图">` : '';
+  $('ref-name').textContent = refItems.length ? `已选 ${refItems.length} 张参考图（第 1 张作首帧 / 主参考图）` : '';
+  $('btn-clear-ref').hidden = !refItems.length;
+  $('ref-preview').innerHTML = refItems.map((item) => `<span class="ref-thumb" style="display:inline-block;position:relative;margin:4px 6px 0 0">
+    <img src="${refThumb(item)}" alt="${esc(item.label || '参考图')}" style="width:88px;height:88px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb">
+    <button type="button" data-ref-remove="${item.key}" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:1px solid #d1d5db;background:#fff;cursor:pointer;line-height:1">×</button>
+    <span style="display:block;font-size:11px;color:#9ca3af;max-width:88px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.label || '')}</span>
+  </span>`).join('');
+  document.querySelectorAll('[data-ref-remove]').forEach((b) => b.addEventListener('click', () => {
+    refItems = refItems.filter((x) => x.key !== b.dataset.refRemove);
+    renderRef();
+  }));
+}
+function addRefUploads(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  let added = 0;
+  const readers = list.map((f) => new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve({ file: f, dataUrl: String(r.result) });
+    r.onerror = () => resolve(null);
+    r.readAsDataURL(f);
+  }));
+  Promise.all(readers).then((results) => {
+    for (const item of results) {
+      if (!item) continue;
+      if (refItems.length >= MAX_REFS) break;
+      refItems.push({ key: 'u' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), kind: 'upload', label: item.file.name || '上传图片', dataUrl: item.dataUrl });
+      added++;
+    }
+    if (refItems.length >= MAX_REFS && list.length > added) setStatus($('gen-status'), '参考图最多 ' + MAX_REFS + ' 张', true);
+    renderRef();
+  });
 }
 $('ref-file').addEventListener('change', (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  const r = new FileReader();
-  r.onload = () => { refDataUrl = String(r.result); refSourceId = ''; renderRef(); };
-  r.readAsDataURL(f);
+  addRefUploads(e.target.files);
+  e.target.value = '';
 });
-$('btn-clear-ref').addEventListener('click', () => { refDataUrl = ''; refSourceId = ''; $('ref-file').value = ''; renderRef(); });
+$('btn-clear-ref').addEventListener('click', () => { refItems = []; $('ref-file').value = ''; renderRef(); });
 $('btn-clear-prompt').addEventListener('click', () => { $('prompt').value = ''; });
+// ---------- 扩写提示词（文本模型） ----------
+// 文本模型只做纯文本扩写：把提示词框里的短提示词扩写成详细的生成提示词，
+// 填回框里，用户改好再点生成。渠道的文本接口是纯文本的，不支持看图，
+// 所以没有“描述参考图”按钮（不是没做，是渠道根本不支持）。
+$('btn-enhance').addEventListener('click', async () => {
+  const prompt = $('prompt').value.trim();
+  if (!prompt) { setStatus($('gen-status'), '请先输入提示词再扩写', true); return; }
+  const btn = $('btn-enhance');
+  btn.disabled = true;
+  setStatus($('gen-status'), '正在扩写提示词…');
+  try {
+    const { data } = await apiJson('/api/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, type: genType, channelId: $('gen-channel').value || undefined }) });
+    if (!data.ok) setStatus($('gen-status'), '扩写失败：' + (data.error || '未知错误'), true);
+    else { $('prompt').value = data.text || prompt; setStatus($('gen-status'), '已扩写，检查一下再点生成'); }
+  } catch (e) { setStatus($('gen-status'), '扩写失败：' + e.message, true); }
+  btn.disabled = false;
+});
 // ---------- 生成参数：与原版 infinite-canvas 对齐（web/src/lib/media-size.ts） ----------
 // 生图：规格（1k/2k/4k/auto）× 比例 → 像素尺寸；生视频：清晰度 × 比例 → 像素尺寸。
 const IMAGE_SIZE_PRESETS = {
@@ -158,8 +206,10 @@ $('btn-generate').addEventListener('click', async () => {
   setStatus($('gen-status'), '生成中（模型那边还在生成，请稍等）…');
   try {
     const body = { type: genType, prompt, channelId: $('gen-channel').value || undefined };
+    // 参考图（多张，按选择顺序，第一张作首帧 / 主参考图）：生图和生视频都用
+    if (refItems.length) body.references = refItems.map((item) => item.kind === 'upload' ? { dataUrl: item.dataUrl } : { generationId: item.generationId });
     if (genType === 'image') { body.size = computeImageSize($('img-scale').value, $('img-ratio').value); body.quality = $('img-quality').value; body.count = $('img-count').value; if ($('gen-model').value) body.imageModel = $('gen-model').value; }
-    else { body.seconds = $('vid-seconds').value; body.size = computeVideoSize($('vid-res').value, $('vid-ratio').value); body.resolution = $('vid-res').value; body.generateAudio = $('vid-audio').checked; body.watermark = $('vid-watermark').checked; if ($('gen-model').value) body.videoModel = $('gen-model').value; if (refDataUrl) body.referenceImage = refDataUrl; if (refSourceId) body.sourceGenerationId = refSourceId; }
+    else { body.seconds = $('vid-seconds').value; body.size = computeVideoSize($('vid-res').value, $('vid-ratio').value); body.resolution = $('vid-res').value; body.generateAudio = $('vid-audio').checked; body.watermark = $('vid-watermark').checked; if ($('gen-model').value) body.videoModel = $('gen-model').value;  }
     const { data } = await apiJson('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!data.ok) { setStatus($('gen-status'), '生成失败：' + (data.error || '未知错误'), true); btn.disabled = false; }
     else {
@@ -181,7 +231,7 @@ async function loadResults(preloaded) {
       : g.type === 'video'
       ? `<video src="${media(g.url)}" controls preload="metadata"></video>`
       : (g.url ? `<img src="${media(g.url)}" alt="">` : `<div style="padding:40px;text-align:center;color:#999">图片已失效</div>`);
-    const extra = g.type === 'image' && g.status !== 'generating' ? `<button class="btn" data-act="to-video" data-id="${g.id}">🎬 用这张图生成视频</button><button class="btn" data-act="edit-prompt" data-id="${g.id}">✏️ 编辑提示词</button>` : '';
+    const extra = g.type === 'image' && g.status !== 'generating' ? `<button class="btn" data-act="to-video" data-id="${g.id}">🎬 用这张图生成视频</button><button class="btn" data-act="add-ref" data-id="${g.id}">＋ 设为参考图</button><button class="btn" data-act="edit-prompt" data-id="${g.id}">✏️ 编辑提示词</button>` : '';
     return `<div class="result">${mediaHtml}<div class="meta">
       <p><b>${g.type === 'video' ? '视频' : '图片'}</b> · ${esc(g.channelName || '')} · ${esc(g.model || '')}</p>
       <p>${esc(g.prompt || '')}</p>
@@ -197,11 +247,19 @@ async function loadResults(preloaded) {
       if (!g) return;
       if (b.dataset.act === 'delete') { deleteResult(g.id); }
       if (b.dataset.act === 'edit-prompt') { $('prompt').value = g.prompt || ''; $('prompt').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+      if (b.dataset.act === 'add-ref') {
+        // 把这张生成图片加进参考图列表（换装等多张参考图时用）
+        if (refItems.some((x) => x.kind === 'generation' && x.generationId === g.id)) { setStatus($('gen-status'), '这张图已经是参考图了'); return; }
+        if (refItems.length >= MAX_REFS) { setStatus($('gen-status'), '参考图最多 ' + MAX_REFS + ' 张', true); return; }
+        refItems.push({ key: 'g' + g.id, kind: 'generation', label: '生成图片', generationId: g.id, fileName: g.fileName });
+        renderRef();
+        setStatus($('gen-status'), '已加为参考图（第 ' + refItems.length + ' 张），生图和生视频都可以用');
+      }
       if (b.dataset.act === 'to-video') {
-        // 图生视频：切到生视频，这张图作首帧，提示词填回去可改
+        // 图生视频：切到生视频，这张图作首帧（参考图列表第 1 张），提示词填回去可改
         document.querySelector('#type-seg button[data-type="video"]').click();
         $('prompt').value = g.prompt || '';
-        refSourceId = g.id; refDataUrl = '';
+        refItems = [{ key: 'g' + g.id, kind: 'generation', label: '生成图片', generationId: g.id, fileName: g.fileName }];
         renderRef();
         $('ref-name').textContent = '已用这张生成图片作首帧';
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -268,8 +326,8 @@ async function loadAdminChannels() {
     <h3>${esc(c.name)} ${c.isDefault ? '<span class="tag">默认</span>' : ''} ${c.enabled ? '' : '<span class="tag off">已停用</span>'}</h3>
     <p>Base URL：${esc(c.baseUrl)}</p>
     <p>Key：${esc(c.apiKeyMasked || '')}</p>
-    <p>生图模型：${esc(c.imageModel || '—')}　生视频模型：${esc(c.videoModel || '—')}</p>
-    <p>能力：${(c.capabilities || []).map((x) => x === 'image' ? '生图' : '生视频').join('、') || '—'}</p>
+    <p>生图模型：${esc(c.imageModel || '—')}　生视频模型：${esc(c.videoModel || '—')}　文本模型：${esc(c.textModel || '—')}</p>
+    <p>能力：${(c.capabilities || []).map((x) => x === 'image' ? '生图' : x === 'video' ? '生视频' : '文本').join('、') || '—'}</p>
     <div class="actions">
       <button class="btn" data-test="${c.id}">测连接</button>
       <button class="btn" data-edit="${c.id}">编辑</button>
@@ -287,11 +345,12 @@ async function loadAdminChannels() {
     $('ch-id').value = c.id; $('ch-name').value = c.name; $('ch-base').value = c.baseUrl; $('ch-key').value = '';
     $('ch-cap-image').checked = (c.capabilities || []).includes('image');
     $('ch-cap-video').checked = (c.capabilities || []).includes('video');
+    $('ch-cap-text').checked = (c.capabilities || []).includes('text');
     $('ch-enabled').checked = c.enabled; $('ch-default').checked = !!c.isDefault;
     $('channel-form-title').textContent = '编辑渠道：' + c.name;
     // 编辑时用已保存的 Key 自动拉一次模型列表，下拉框里回填已选的模型
     fetchedModels = []; fillModelSelects();
-    fetchModelsForForm({ imageModel: c.imageModel, videoModel: c.videoModel });
+    fetchModelsForForm({ imageModel: c.imageModel, videoModel: c.videoModel, textModel: c.textModel });
     window.scrollTo({ top: document.querySelector('#channel-form-title').offsetTop, behavior: 'smooth' });
   }));
   document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
@@ -308,14 +367,16 @@ async function loadAdminChannels() {
 // ---------- 渠道表单：模型只能从 /models 返回的列表里下拉选择，不能手填 ----------
 let fetchedModels = [];
 function fillModelSelects(preset) {
-  const imgSel = $('ch-img-model'); const vidSel = $('ch-vid-model');
+  const imgSel = $('ch-img-model'); const vidSel = $('ch-vid-model'); const txtSel = $('ch-text-model');
   const imgVal = (preset && preset.imageModel) || imgSel.value;
   const vidVal = (preset && preset.videoModel) || vidSel.value;
+  const txtVal = (preset && preset.textModel) || txtSel.value;
   const opts = '<option value="">— 请选择 —</option>' + fetchedModels.map((m) => `<option>${esc(m)}</option>`).join('');
-  imgSel.innerHTML = opts; vidSel.innerHTML = opts;
-  imgSel.disabled = !fetchedModels.length; vidSel.disabled = !fetchedModels.length;
+  imgSel.innerHTML = opts; vidSel.innerHTML = opts; txtSel.innerHTML = opts;
+  imgSel.disabled = !fetchedModels.length; vidSel.disabled = !fetchedModels.length; txtSel.disabled = !fetchedModels.length;
   if (imgVal && fetchedModels.includes(imgVal)) imgSel.value = imgVal;
   if (vidVal && fetchedModels.includes(vidVal)) vidSel.value = vidVal;
+  if (txtVal && fetchedModels.includes(txtVal)) txtSel.value = txtVal;
 }
 async function fetchModelsForForm(preset) {
   // preset: 编辑已有渠道时，预先选中的生图/生视频模型（获取成功后回填）
@@ -336,20 +397,21 @@ async function fetchModelsForForm(preset) {
   }
   fetchedModels = data.models;
   fillModelSelects(preset);
-  setStatus($('model-fetch-status'), `已获取 ${data.total} 个模型，请在下拉框里选生图 / 生视频模型`);
+  setStatus($('model-fetch-status'), `已获取 ${data.total} 个模型，请在下拉框里选生图 / 生视频 / 文本模型`);
   return true;
 }
 $('btn-fetch-models').addEventListener('click', () => fetchModelsForForm(null));
 
 $('btn-save-channel').addEventListener('click', async () => {
   const id = $('ch-id').value;
-  const body = { name: $('ch-name').value.trim(), baseUrl: $('ch-base').value.trim(), apiKey: $('ch-key').value.trim(), imageModel: $('ch-img-model').value, videoModel: $('ch-vid-model').value, capabilities: [...($('ch-cap-image').checked ? ['image'] : []), ...($('ch-cap-video').checked ? ['video'] : [])], enabled: $('ch-enabled').checked, isDefault: $('ch-default').checked };
+  const body = { name: $('ch-name').value.trim(), baseUrl: $('ch-base').value.trim(), apiKey: $('ch-key').value.trim(), imageModel: $('ch-img-model').value, videoModel: $('ch-vid-model').value, textModel: $('ch-text-model').value, capabilities: [...($('ch-cap-image').checked ? ['image'] : []), ...($('ch-cap-video').checked ? ['video'] : []), ...($('ch-cap-text').checked ? ['text'] : [])], enabled: $('ch-enabled').checked, isDefault: $('ch-default').checked };
   if (!id && !body.apiKey) { setStatus($('channel-status'), '请填写 API Key', true); return; }
   if (id && !body.apiKey) delete body.apiKey;
   // 模型只能从“获取模型列表”返回的下拉选项里选，不能手填、不能留空蒙过去
   if (!fetchedModels.length) { setStatus($('channel-status'), '请先点“获取模型列表”，从返回的模型里下拉选择', true); return; }
   if (body.capabilities.includes('image') && (!body.imageModel || !fetchedModels.includes(body.imageModel))) { setStatus($('channel-status'), '请在生图模型下拉框里选一个模型', true); return; }
   if (body.capabilities.includes('video') && body.videoModel && !fetchedModels.includes(body.videoModel)) { setStatus($('channel-status'), '生视频模型只能从下拉框里选', true); return; }
+  if (body.capabilities.includes('text') && (!body.textModel || !fetchedModels.includes(body.textModel))) { setStatus($('channel-status'), '请在文本模型下拉框里选一个模型', true); return; }
   const path = id ? '/api/admin/channels/' + encodeURIComponent(id) : '/api/admin/channels';
   const { data } = await apiJson(path, { method: id ? 'PUT' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
   if (!data.ok) { setStatus($('channel-status'), data.error || '保存失败', true); return; }
