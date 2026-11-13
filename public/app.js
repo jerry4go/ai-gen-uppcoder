@@ -24,7 +24,8 @@ let refItems = [];
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 async function apiJson(path, opts) {
-  const res = await fetch(api(path), opts);
+    // API 请求一律不走缓存：CDN 会缓存 GET 接口，轮询会拿到旧的生成列表。
+  const res = await fetch(api(path), { cache: 'no-store', ...(opts || {}) });
   const text = await res.text();
   let data = null;
   try { data = JSON.parse(text); } catch { data = { ok: false, error: text.slice(0, 200) }; }
