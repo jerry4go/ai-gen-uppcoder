@@ -15,6 +15,7 @@ main{padding:16px 24px 32px;max-width:980px;margin:0 auto}
 .hint{color:#6b7280;font-size:13px;line-height:1.6}
 .muted{color:#9ca3af;font-size:13px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.row[hidden]{display:none}
 .seg{display:flex;border:1px solid #d1d5db;border-radius:8px;overflow:hidden}
 .seg button{border:0;background:#fff;padding:8px 14px;cursor:pointer}
 .seg button.active{background:#2563eb;color:#fff}
