@@ -641,7 +641,7 @@ const server = http.createServer(async (req, res) => {
       }
       // GET /api/generations（前台历史）
       if (method === 'GET' && pathname === '/api/generations') {
-        return sendJson(res, 200, { ok: true, total: generations.length, generations: generations.map(g => ({ ...g, fileName: undefined })) });
+        return sendJson(res, 200, { ok: true, total: generations.length, generations });
       }
       // GET /api/media/:file（生成的文件，公开播放/查看；文件名是随机 ID，不可猜）
       // 支持 HTTP Range（分段请求）：iPhone Safari 播 <video> 时必须用 Range
@@ -747,7 +747,7 @@ const server = http.createServer(async (req, res) => {
             : friendly;
           pending.forEach(p => updateGeneration(p.id, { status: 'failed', note: '', error: errText }));
         })();
-        return sendJson(res, 200, { ok: true, type, generations: pending.map(g => ({ ...g, fileName: undefined })) });
+        return sendJson(res, 200, { ok: true, type, generations: pending });
       }
       // POST /api/text（文本模型：扩写提示词）
       // 原版 infinite-canvas 的 textModel（默认 gpt-5.5）走 /responses 或
