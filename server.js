@@ -85,15 +85,15 @@ function maskKey(key) {
   return '********' + k.slice(-4);
 }
 function publicChannel(c) {
-  return { id: c.id, name: c.name, baseUrl: c.baseUrl, apiKeyMasked: maskKey(c.apiKey), imageModel: c.imageModel || '', videoModel: c.videoModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault, createdAt: c.createdAt };
+  return { id: c.id, name: c.name, baseUrl: c.baseUrl, apiKeyMasked: maskKey(c.apiKey), imageModel: c.imageModel || '', videoModel: c.videoModel || '', textModel: c.textModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault, createdAt: c.createdAt };
 }
 function publicChannelForFront(c) {
   // 前台只需要知道名字、模型和能力，绝不返回 Key（哪怕是掩码以外的任何形式）
-  return { id: c.id, name: c.name, imageModel: c.imageModel || '', videoModel: c.videoModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault };
+  return { id: c.id, name: c.name, imageModel: c.imageModel || '', videoModel: c.videoModel || '', textModel: c.textModel || '', capabilities: c.capabilities || [], enabled: c.enabled !== false, isDefault: !!c.isDefault };
 }
 // 模型只能从渠道 /models 返回的列表里选：保存渠道时先拉一次 /models 校验，
 // 填的模型不在列表里就拒绝；拉不到列表也拒绝（不能靠手填蒙过去）。
-async function validateModelsAgainstChannel(baseUrl, apiKey, imageModel, videoModel) {
+async function validateModelsAgainstChannel(baseUrl, apiKey, imageModel, videoModel, textModel) {
   let models;
   try {
     const r = await fetchTimeout(baseUrl + '/models', { headers: { Authorization: 'Bearer ' + apiKey } }, 15000);
@@ -105,7 +105,8 @@ async function validateModelsAgainstChannel(baseUrl, apiKey, imageModel, videoMo
   }
   if (!models.length) return '渠道没有返回任何模型，请检查 Base URL / Key';
   if (imageModel && !models.includes(imageModel)) return '生图模型 ' + imageModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';
-  if (videoModel && !models.includes(videoModel)) return '生视频模型 ' + videoModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';
+  if (videoModel && !models.includes(videoModel)) return '生视频模型 ' + videoModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';   
+  if (textModel && !models.includes(textModel)) return '文本模型 ' + textModel + ' 不在渠道返回的模型列表里（共 ' + models.length + ' 个），请从下拉框里选';
   return null;
 }
 function pickChannel(channelId, kind) {
@@ -405,6 +406,40 @@ async function pollImageTask(channel, taskId) {
   err.doNotRetry = true;
   throw err;
 }
+// ---------- 参考图（多张，用于换装等场景） ----------
+// 前台按用户选择的顺序发 references 数组，每项是 {dataUrl}（刚上传的图）
+// 或 {generationId}（已生成图片的记录）；老格式的单图字段 referenceImage /
+// sourceGenerationId 也兼容。渠道最多支持 10 张，这里上限 5 张，避免一次
+// 请求体过大；第一张作首帧（视频）或主参考图，其余作附加参考。
+const MAX_REFERENCES = 5;
+function collectReferences(body) {
+  const refs = [];
+  const pushDataUrl = (du) => {
+    if (refs.length >= MAX_REFERENCES) return;
+    try { refs.push(dataUrlToBuffer(du)); } catch { /* 格式不对的图直接跳过 */ }
+  };
+  const pushGeneration = (id) => {
+    if (refs.length >= MAX_REFERENCES) return;
+    const src = generations.find(g => g.id === id);
+    if (src && src.fileName) {
+      const p = path.join(MEDIA_DIR, src.fileName);
+      if (fs.existsSync(p)) refs.push({ mime: src.mimeType || 'image/png', buf: fs.readFileSync(p), ext: extForMime(src.mimeType) });
+    }
+  };
+  if (Array.isArray(body.references)) {
+    for (const r of body.references) {
+      if (refs.length >= MAX_REFERENCES) break;
+      if (r && r.dataUrl) pushDataUrl(r.dataUrl);
+      else if (r && r.generationId) pushGeneration(r.generationId);
+    }
+  }
+  if (!refs.length) {
+    if (body.referenceImage) pushDataUrl(body.referenceImage);
+    else if (body.sourceGenerationId) pushGeneration(body.sourceGenerationId);
+  }
+  return refs;
+}
+
 async function generateImage(channel, body) {
   const prompt = String(body.prompt || '').trim();
   const size = String(body.size || '1024x1024');
@@ -418,11 +453,14 @@ async function generateImage(channel, body) {
   const results = [];
   for (let i = 0; i < count; i++) {
     let taskId = '';
-    if (body.referenceImage) {
-      const ref = dataUrlToBuffer(body.referenceImage);
+    const refs = collectReferences(body);
+    if (refs.length) {
+      // 图生图：原版做法，1 张用 image 字段，多张每张都用 image[] 字段。
+      const imageField = refs.length > 1 ? 'image[]' : 'image';
+      const files = refs.map((r, idx) => ({ name: imageField, filename: 'reference' + (idx + 1) + '.' + r.ext, mime: r.mime, buf: r.buf }));
       const { body: mpBody, contentType } = buildMultipart(
         { model, prompt, size, n: '1', quality, async: 'true', ...imageFormatFields(model) },
-        [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
+        files
       );
       const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TASK_CREATE_TIMEOUT_MS);
       const { json, text } = await readJsonResponse(res);
@@ -474,24 +512,18 @@ async function generateVideo(channel, body) {
   const watermark = body.watermark === true || body.watermark === 'true';
   const size = String(body.size || '1280x720');
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
-  // 首帧：优先用上传的参考图；其次用已生成图片的记录（sourceGenerationId）
-  let firstFrame = null;
-  if (body.referenceImage) firstFrame = dataUrlToBuffer(body.referenceImage);
-  else if (body.sourceGenerationId) {
-    const src = generations.find(g => g.id === body.sourceGenerationId);
-    if (src && src.fileName) {
-      const p = path.join(MEDIA_DIR, src.fileName);
-      if (fs.existsSync(p)) firstFrame = { mime: src.mimeType || 'image/png', buf: fs.readFileSync(p), ext: extForMime(src.mimeType) };
-    }
-  }
+  // 参考图（多张，用于换装等场景）：第一张作首帧，其余每张作 image[] 参考。
+  // 渠道收到 first_frame / image[] 后按这个顺序排进参考列表；之前同时发的
+  // 通用 images 字段会被渠道忽略（有专用字段时不读 images），所以不再发。
+  const refs = collectReferences(body);
   // 按原版 createOpenAIVideoTask 补齐字段：ratio / resolution_name /
   // generate_audio / watermark / mode（mode 始终 frames，见上）。
   const ratio = inferVideoRatio(size);
   const fields = { model, prompt, seconds, size, ...(ratio && ratio !== 'auto' ? { ratio } : {}), resolution_name: resolution + 'p', generate_audio: String(generateAudio), watermark: String(watermark), mode: 'frames' };
   const files = [];
-  if (firstFrame) {
-    files.push({ name: 'first_frame', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
-    files.push({ name: 'images', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
+  if (refs.length) {
+    files.push({ name: 'first_frame', filename: 'first.' + refs[0].ext, mime: refs[0].mime, buf: refs[0].buf });
+    for (let i = 1; i < refs.length; i++) files.push({ name: 'image[]', filename: 'ref' + (i + 1) + '.' + refs[i].ext, mime: refs[i].mime, buf: refs[i].buf });
     
   }
   const { body: mpBody, contentType } = buildMultipart(fields, files);
@@ -698,6 +730,53 @@ const server = http.createServer(async (req, res) => {
         })();
         return sendJson(res, 200, { ok: true, type, generations: pending.map(g => ({ ...g, fileName: undefined })) });
       }
+      // POST /api/text（文本模型：扩写提示词）
+      // 原版 infinite-canvas 的 textModel（默认 gpt-5.5）走 /responses 或
+      // /chat/completions；这里用渠道的 /v1/chat/completions（muse2api 的
+      // 文本模型 muse-spark 支持该接口，返回标准 choices[0].message.content）。
+      // 文本生成只要几十秒，直接等渠道返回，不走异步任务。
+      // 注意：该接口是纯文本的——消息里带 image_url 时渠道只会把它变成
+      // "[图片]" 占位文字，模型看不到图，所以“描述参考图”做不了（不是
+      // 没做按钮，是渠道根本不支持）；扩写提示词是纯文本，完全没问题。
+      if (method === 'POST' && pathname === '/api/text') {
+        const body = JSON.parse(await readBody(req) || '{}');
+        const prompt = String(body.prompt || '').trim();
+        if (!prompt) return sendJson(res, 400, { ok: false, error: '请先输入提示词' });
+        const type = body.type === 'video' ? 'video' : 'image';
+        const channel = pickChannel(body.channelId, 'text');
+        if (!channel) return sendJson(res, 400, { ok: false, error: '没有可用的文本渠道，请先在后台添加支持文本的渠道并填写 textModel' });
+        const model = String(body.textModel || channel.textModel || '').trim();
+        if (!model) return sendJson(res, 400, { ok: false, error: '该渠道没有配置文本模型，请先在后台填写 textModel' });
+        const instruction = type === 'video'
+          ? '你是一位专业的 AI 视频生成提示词专家。请把用户给出的简短提示词扩写成一段详细、具体、可直接用于 AI 生视频的提示词。扩写时补充：主体外貌与动作、运镜方式与镜头运动、场景环境与变化、光线氛围、色彩风格、节奏、画质要求。只输出扩写后的提示词本身（与用户输入同语言），不要加任何解释、标题、引号或分条列点。'
+          : '你是一位专业的 AI 绘画提示词专家。请把用户给出的简短提示词扩写成一段详细、具体、可直接用于 AI 生图的提示词。扩写时补充：主体细节、动作神态、场景环境、光线氛围、色彩风格、镜头视角、构图、画质要求。只输出扩写后的提示词本身（与用户输入同语言），不要加任何解释、标题、引号或分条列点。';
+        let text = '';
+        try {
+          const r = await fetchTimeout(channel.baseUrl + '/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + channel.apiKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages: [{ role: 'system', content: instruction }, { role: 'user', content: prompt }] }),
+          }, 120000);
+          const { json, text: rawText } = await readJsonResponse(r);
+          if (!r.ok) throw channelHttpError(r.status, (json && (json.error && json.error.message)) || rawText);
+          text = String((json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || (json && json.output_text) || '').trim();
+          if (!text) {
+            // 兼容 /responses 形态：output[].content[].text
+            const out = json && Array.isArray(json.output) ? json.output : [];
+            const parts = [];
+            for (const item of out) {
+              const content = Array.isArray(item.content) ? item.content : [];
+              for (const c of content) if (c && c.text) parts.push(String(c.text));
+            }
+            text = parts.join('').trim();
+          }
+        } catch (e) {
+          if (e && typeof e === 'object' && !e.doNotRetry) e.doNotRetry = true;
+          return sendJson(res, 200, { ok: false, error: '扩写失败：' + (e.message || '未知错误') });
+        }
+        if (!text) return sendJson(res, 200, { ok: false, error: '扩写失败：渠道没有返回文本' });
+        return sendJson(res, 200, { ok: true, text });
+      }
       // DELETE /api/generations/:id（删除一条记录及文件）
       if (method === 'DELETE' && pathname.startsWith('/api/generations/')) {
         const id = pathname.slice('/api/generations/'.length);
@@ -755,12 +834,13 @@ const server = http.createServer(async (req, res) => {
           if (!String(body.name || '').trim() || !cleanBaseUrl(body.baseUrl) || !String(body.apiKey || '').trim()) {
             return sendJson(res, 400, { ok: false, error: '名称、Base URL、API Key 都要填' });
           }
-          const caps = Array.isArray(body.capabilities) ? body.capabilities.filter(x => x === 'image' || x === 'video') : [];
-          if (!caps.length) return sendJson(res, 400, { ok: false, error: '至少选一种能力：生图或生视频' });
+          const caps = Array.isArray(body.capabilities) ? body.capabilities.filter(x => x === 'image' || x === 'video' || x === 'text') : [];
+          if (!caps.length) return sendJson(res, 400, { ok: false, error: '至少选一种能力：生图、生视频或文本' });
           if (caps.includes('image') && !String(body.imageModel || '').trim()) return sendJson(res, 400, { ok: false, error: '请先点“获取模型列表”，从下拉框里选一个生图模型' });
-          const modelErr = await validateModelsAgainstChannel(cleanBaseUrl(body.baseUrl), String(body.apiKey).trim(), String(body.imageModel || '').trim(), String(body.videoModel || '').trim());
+          if (caps.includes('text') && !String(body.textModel || '').trim()) return sendJson(res, 400, { ok: false, error: '请先点“获取模型列表”，从下拉框里选一个文本模型' });
+          const modelErr = await validateModelsAgainstChannel(cleanBaseUrl(body.baseUrl), String(body.apiKey).trim(), String(body.imageModel || '').trim(), String(body.videoModel || '').trim(), String(body.textModel || '').trim());
           if (modelErr) return sendJson(res, 400, { ok: false, error: modelErr });
-          const c = { id: newId(), name: String(body.name).trim(), baseUrl: cleanBaseUrl(body.baseUrl), apiKey: String(body.apiKey).trim(), imageModel: String(body.imageModel || '').trim(), videoModel: String(body.videoModel || '').trim(), capabilities: caps, enabled: body.enabled !== false, isDefault: !!body.isDefault, createdAt: nowIso() };
+          const c = { id: newId(), name: String(body.name).trim(), baseUrl: cleanBaseUrl(body.baseUrl), apiKey: String(body.apiKey).trim(), imageModel: String(body.imageModel || '').trim(), videoModel: String(body.videoModel || '').trim(), textModel: String(body.textModel || '').trim(), capabilities: caps, enabled: body.enabled !== false, isDefault: !!body.isDefault, createdAt: nowIso() };
           if (c.isDefault) channels.forEach(x => { x.isDefault = false; });
           channels.push(c); saveJson('channels.json', channels);
           return sendJson(res, 200, { ok: true, channel: publicChannel(c) });
@@ -781,12 +861,13 @@ const server = http.createServer(async (req, res) => {
           if (body.apiKey !== undefined && String(body.apiKey).trim() && !String(body.apiKey).startsWith('********')) c.apiKey = String(body.apiKey).trim();
           if (body.imageModel !== undefined) c.imageModel = String(body.imageModel).trim();
           if (body.videoModel !== undefined) c.videoModel = String(body.videoModel).trim();
-          if (Array.isArray(body.capabilities)) c.capabilities = body.capabilities.filter(x => x === 'image' || x === 'video');
+          if (body.textModel !== undefined) c.textModel = String(body.textModel).trim();
+          if (Array.isArray(body.capabilities)) c.capabilities = body.capabilities.filter(x => x === 'image' || x === 'video' || x === 'text');
           if (body.enabled !== undefined) c.enabled = !!body.enabled;
           if (body.isDefault) { channels.forEach(x => { x.isDefault = false; }); c.isDefault = true; }
           // 改了模型时同样校验：模型必须在渠道 /models 返回的列表里
-          if (body.imageModel !== undefined || body.videoModel !== undefined || body.baseUrl !== undefined || (body.apiKey !== undefined && String(body.apiKey).trim() && !String(body.apiKey).startsWith('********'))) {
-            const modelErr = await validateModelsAgainstChannel(c.baseUrl, c.apiKey, c.imageModel, c.videoModel);
+          if (body.imageModel !== undefined || body.videoModel !== undefined || body.textModel !== undefined || body.baseUrl !== undefined || (body.apiKey !== undefined && String(body.apiKey).trim() && !String(body.apiKey).startsWith('********'))) {
+            const modelErr = await validateModelsAgainstChannel(c.baseUrl, c.apiKey, c.imageModel, c.videoModel, c.textModel);
             if (modelErr) return sendJson(res, 400, { ok: false, error: modelErr });
           }
           saveJson('channels.json', channels);
