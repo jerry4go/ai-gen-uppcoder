@@ -90,6 +90,41 @@ $('ref-file').addEventListener('change', (e) => {
 });
 $('btn-clear-ref').addEventListener('click', () => { refDataUrl = ''; refSourceId = ''; $('ref-file').value = ''; renderRef(); });
 $('btn-clear-prompt').addEventListener('click', () => { $('prompt').value = ''; });
+// ---------- 生成参数：与原版 infinite-canvas 对齐（web/src/lib/media-size.ts） ----------
+// 生图：规格（1k/2k/4k/auto）× 比例 → 像素尺寸；生视频：清晰度 × 比例 → 像素尺寸。
+const IMAGE_SIZE_PRESETS = {
+  '1k': { '1:1': '1024x1024', '2:3': '1024x1536', '3:2': '1536x1024', '4:3': '1024x768', '3:4': '768x1024', '16:9': '1536x864', '9:16': '864x1536', '21:9': '2016x864', '9:21': '864x2016' },
+  '2k': { '1:1': '2048x2048', '2:3': '1360x2048', '3:2': '2048x1360', '4:3': '2048x1536', '3:4': '1536x2048', '16:9': '2048x1152', '9:16': '1152x2048', '21:9': '2688x1152', '9:21': '1152x2688' },
+  '4k': { '1:1': '2880x2880', '2:3': '2336x3520', '3:2': '3520x2336', '4:3': '3312x2480', '3:4': '2480x3312', '16:9': '3840x2160', '9:16': '2160x3840', '21:9': '3840x1648', '9:21': '1648x3840' },
+};
+function computeImageSize(scale, ratio) {
+  if (!ratio || ratio === 'auto') return 'auto';
+  const s = String(scale || '1k').toLowerCase();
+  if (s === 'auto') return ratio;
+  return (IMAGE_SIZE_PRESETS[s] && IMAGE_SIZE_PRESETS[s][ratio]) || '1024x1024';
+}
+function computeVideoSize(resolution, ratio) {
+  if (!ratio || ratio === 'auto') return 'auto';
+  const parts = String(ratio).split(':');
+  if (parts.length !== 2) return 'auto';
+  const w = Number(parts[0]), h = Number(parts[1]);
+  if (!w || !h) return 'auto';
+  const p = Math.max(1, Math.floor(Number(resolution) || 720));
+  const landscape = w >= h;
+  const even = (v) => Math.max(2, Math.round(v / 2) * 2);
+  const width = even(landscape ? (p * w) / h : p);
+  const height = even(landscape ? p : (p * h) / w);
+  return width + 'x' + height;
+}
+function refreshSizeLabels() {
+  const imgSize = computeImageSize($('img-scale').value, $('img-ratio').value);
+  $('img-size-show').textContent = imgSize === 'auto' ? '尺寸：自动' : '尺寸：' + imgSize;
+  const vidSize = computeVideoSize($('vid-res').value, $('vid-ratio').value);
+  $('vid-size-show').textContent = vidSize === 'auto' ? '尺寸：自动' : '尺寸：' + vidSize;
+}
+['img-scale', 'img-ratio'].forEach((id) => $(id).addEventListener('change', refreshSizeLabels));
+['vid-res', 'vid-ratio'].forEach((id) => $(id).addEventListener('change', refreshSizeLabels));
+refreshSizeLabels();
 
 let pollTimer = null;
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
@@ -123,8 +158,8 @@ $('btn-generate').addEventListener('click', async () => {
   setStatus($('gen-status'), '生成中（模型那边还在生成，请稍等）…');
   try {
     const body = { type: genType, prompt, channelId: $('gen-channel').value || undefined };
-    if (genType === 'image') { body.size = $('img-size').value; body.count = $('img-count').value; if ($('gen-model').value) body.imageModel = $('gen-model').value; }
-    else { body.seconds = $('vid-seconds').value; body.size = $('vid-size').value; if ($('gen-model').value) body.videoModel = $('gen-model').value; if (refDataUrl) body.referenceImage = refDataUrl; if (refSourceId) body.sourceGenerationId = refSourceId; }
+    if (genType === 'image') { body.size = computeImageSize($('img-scale').value, $('img-ratio').value); body.quality = $('img-quality').value; body.count = $('img-count').value; if ($('gen-model').value) body.imageModel = $('gen-model').value; }
+    else { body.seconds = $('vid-seconds').value; body.size = computeVideoSize($('vid-res').value, $('vid-ratio').value); body.resolution = $('vid-res').value; body.generateAudio = $('vid-audio').checked; body.watermark = $('vid-watermark').checked; if ($('gen-model').value) body.videoModel = $('gen-model').value; if (refDataUrl) body.referenceImage = refDataUrl; if (refSourceId) body.sourceGenerationId = refSourceId; }
     const { data } = await apiJson('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!data.ok) { setStatus($('gen-status'), '生成失败：' + (data.error || '未知错误'), true); btn.disabled = false; }
     else {
