@@ -644,13 +644,32 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, total: generations.length, generations: generations.map(g => ({ ...g, fileName: undefined })) });
       }
       // GET /api/media/:file（生成的文件，公开播放/查看；文件名是随机 ID，不可猜）
+      // 支持 HTTP Range（分段请求）：iPhone Safari 播 <video> 时必须用 Range
+      // 取数据，收到 200 整文件而不是 206 分段时会直接播不了；桌面浏览器
+      // 容忍整文件下载，所以网页端能播、iPhone 上不行。原因就是这里之前
+      // 完全忽略 Range 头。实现：有合法的 bytes=start-end 就回 206 +
+      // Content-Range 只发那一段；没有 Range 就回 200 整文件；非法 Range 回 416。
       if (method === 'GET' && pathname.startsWith('/api/media/')) {
         const fileName = pathname.slice('/api/media/'.length);
         if (!fileName || fileName.includes('/') || fileName.includes('..')) return sendJson(res, 400, { ok: false, error: '文件名不正确' });
         const full = path.join(MEDIA_DIR, fileName);
         if (!full.startsWith(MEDIA_DIR) || !fs.existsSync(full)) return sendJson(res, 404, { ok: false, error: '文件不存在' });
         const ext = path.extname(full).toLowerCase();
-        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' });
+        const total = fs.statSync(full).size;
+        const range = String(req.headers.range || '').match(/^bytes=(\d*)-(\d*)$/);
+        if (range) {
+            let start = range[1] ? parseInt(range[1], 10) : 0;
+          let end = range[2] ? parseInt(range[2], 10) : total - 1;
+          if (range[1] === '' && range[2] !== '') { start = Math.max(0, total - parseInt(range[2], 10)); end = total - 1; }
+          if (isNaN(start) || isNaN(end) || start > end || start >= total) {
+            res.writeHead(416, { 'Content-Range': 'bytes */' + total, 'Accept-Ranges': 'bytes' });
+            return res.end();
+          }
+          end = Math.min(end, total - 1);
+          res.writeHead(206, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400', 'Accept-Ranges': 'bytes', 'Content-Range': 'bytes ' + start + '-' + end + '/' + total, 'Content-Length': end - start + 1 });
+          return fs.createReadStream(full, { start, end }).pipe(res);
+        }
+        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400', 'Accept-Ranges': 'bytes', 'Content-Length': total });
         return fs.createReadStream(full).pipe(res);
       }
       // POST /api/generate（前台生成：生图 / 生视频）
