@@ -149,6 +149,12 @@
 </main>
 
 <footer class="foot">没有画布、没有节点。数据在服务器 ./data/（channels.json / generations.json / media/）。Uppcoder 容器重建后数据会丢失，记得定期备份 ./data/。</footer>
+
+<!-- 图片预览（点结果图放大，像 Zipline 那样全屏看；再点图片可放大到原尺寸，点空白处或 × 关闭） -->
+<div id="lightbox" hidden>
+  <button id="lightbox-close" aria-label="关闭预览">×</button>
+  <img id="lightbox-img" alt="">
+</div>
 <script src="./app.js"></script>
 </body>
 </html>
