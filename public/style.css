@@ -27,6 +27,8 @@ select{min-width:150px}
 .btn.ghost{background:#f9fafb}
 .btn.danger{color:#dc2626;border-color:#fecaca}
 .btn:disabled{opacity:.55;cursor:not-allowed}
+/* 保存到相册只在手机上显示（桌面浏览器进不了照片，没用） */
+.save-photos{display:none}
 .status{font-size:13px;color:#2563eb}
 .status.err{color:#dc2626}
 .form{display:grid;gap:10px;max-width:560px}
@@ -87,6 +89,8 @@ select{min-width:150px}
   #btn-generate{flex:1 1 100%}
   /* 结果卡片的操作按钮拉满宽度，好点 */
   .result .actions .btn{flex:1;text-align:center}
+    /* 保存到相册只在手机上显示 */
+    .save-photos{display:inline-block}
   .result img,.result video{max-height:300px}
   .foot{padding:12px}
 }
