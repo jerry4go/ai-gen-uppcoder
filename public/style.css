@@ -91,6 +91,8 @@ select{min-width:150px}
   .result .actions .btn{flex:1;text-align:center}
     /* 保存到相册只在手机上显示 */
     .save-photos{display:inline-block}
+  /* 下载只在电脑上显示 */
+  .result .actions .dl-desktop{display:none}
   .result img,.result video{max-height:300px}
   .foot{padding:12px}
 }
