@@ -182,7 +182,10 @@ select{min-width:150px}
   #image-opts label select,#video-opts label select{flex:1;min-width:0}
   #vid-seconds{flex:0 0 auto}
   #btn-generate{flex:1 1 100%}
-  .result .actions .btn{flex:1;text-align:center}
+  /* 结果卡片的操作按钮：手机上两两一排，别都挤在一行被压变形。
+      图片卡有 5 个按钮（图生视频/设为参考图/编辑提示词/保存到相册/删除），
+      之前 flex:1 让它们全挤在一行，字被压得换行变形。改成每项占近半行。 */
+   .result .actions .btn{flex:1 1 45%;text-align:center}
     .save-photos{display:inline-block}
   .result .actions .dl-desktop{display:none}
   .result img,.result video{max-height:300px}
