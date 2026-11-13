@@ -172,6 +172,9 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('ligh
 async function shareToPhotos(g) {
   const url = media(g.url);
   const fileName = g.fileName || (g.url || '').split('/').pop() || 'media';
+  // 点了按钮立刻给反馈：大视频要先把整个文件下下来再分享，需要几秒，
+  // 没提示的话用户会以为点了没反应。
+  setStatus($('gen-status'), '正在准备文件，请稍等…');
   // 先试系统分享（Web Share API）：分享面板里点“存储图像 / 存储视频”就进相册。
   // 注意：iPhone 上大视频（几 MB 以上）canShare 经常直接返回 false，
   // 但直接调 share 有时又能成功，所以只要有 navigator.share 就先试一次，
@@ -183,9 +186,10 @@ async function shareToPhotos(g) {
       const blob = await res.blob();
       const file = new File([blob], fileName, { type: blob.type || (g.type === 'video' ? 'video/mp4' : 'image/png') });
       await navigator.share({ files: [file] });
+      setStatus($('gen-status'), '');
       return; // 分享面板已打开，用户在里面选“存储图像 / 存储视频”
     } catch (e) {
-      if (e && e.name === 'AbortError') return; // 用户在分享面板点了取消，不算错
+      if (e && e.name === 'AbortError') { setStatus($('gen-status'), ''); return; } // 用户在分享面板点了取消，不算错
       // 分享失败（比如大视频 canShare 不通过）就往下走备用方案，不直接下载
     }
   }
