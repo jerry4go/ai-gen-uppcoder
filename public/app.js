@@ -7,6 +7,16 @@ const $ = (id) => document.getElementById(id);
 let genType = 'image';
 let channels = [];
 let token = localStorage.getItem('ai-gen-token') || '';
+// ---------- 主题切换：白昼 / 墨夜 / 青瓷 / 深海，存在 localStorage，刷新后保持 ----------
+const THEMES = ['daylight', 'ink', 'celadon', 'deepsea'];
+function applyTheme(name) {
+  const t = THEMES.includes(name) ? name : 'daylight';
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem('ai-gen-theme', t); } catch {}
+  document.querySelectorAll('#theme-switcher .theme-btn').forEach((b) => b.classList.toggle('active', b.dataset.theme === t));
+}
+document.querySelectorAll('#theme-switcher .theme-btn').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.theme)));
+applyTheme(localStorage.getItem('ai-gen-theme') || 'daylight');
 // 参考图（多张，用于换装等场景）：按用户选择的顺序排，第一张作首帧 / 主参考图。
 // 每项是 {key, kind:'upload'|'generation', label, dataUrl?, generationId?}。
 const MAX_REFS = 5;
