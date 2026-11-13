@@ -16,7 +16,6 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-
 const PORT = parseInt(process.env.PORT || '8000', 10);
 const HOST = '0.0.0.0';
 const ROOT = __dirname;
