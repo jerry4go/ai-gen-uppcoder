@@ -409,6 +409,9 @@ async function generateImage(channel, body) {
   const prompt = String(body.prompt || '').trim();
   const size = String(body.size || '1024x1024');
   const count = Math.min(4, Math.max(1, parseInt(body.count || '1', 10) || 1));
+  // 原版 quality：auto / low / medium / high / xhigh / max，默认 auto；
+  // 2026-11-13 实测渠道 /images/tasks 接受 quality 字段（quality=high 返回 202）。
+  const quality = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(body.quality || '').toLowerCase()) ? String(body.quality).toLowerCase() : 'auto';
   const model = String(body.imageModel || channel.imageModel || '').trim();
   if (!model) throw new Error('该渠道没有配置生图模型，请先在后台填写 imageModel');
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
@@ -418,7 +421,7 @@ async function generateImage(channel, body) {
     if (body.referenceImage) {
       const ref = dataUrlToBuffer(body.referenceImage);
       const { body: mpBody, contentType } = buildMultipart(
-        { model, prompt, size, n: '1', async: 'true', ...imageFormatFields(model) },
+        { model, prompt, size, n: '1', quality, async: 'true', ...imageFormatFields(model) },
         [{ name: 'image', filename: 'reference.' + ref.ext, mime: ref.mime, buf: ref.buf }]
       );
       const res = await fetchTimeout(channel.baseUrl + '/images/edits', { method: 'POST', headers: { ...headers, 'Content-Type': contentType }, body: mpBody }, IMAGE_TASK_CREATE_TIMEOUT_MS);
@@ -429,7 +432,7 @@ async function generateImage(channel, body) {
       const res = await fetchTimeout(channel.baseUrl + '/images/tasks', {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, prompt, size, n: 1, ...imageFormatFields(model) }),
+        body: JSON.stringify({ model, prompt, size, n: 1, quality, ...imageFormatFields(model) }),
       }, IMAGE_TASK_CREATE_TIMEOUT_MS);
       const { json, text } = await readJsonResponse(res);
       if (!res.ok) throw channelHttpError(res.status, (json && (json.error && json.error.message)) || text);
@@ -462,7 +465,13 @@ async function generateVideo(channel, body) {
   const prompt = String(body.prompt || '').trim();
   const model = String(body.videoModel || channel.videoModel || '').trim();
   if (!model) throw new Error('该渠道没有配置生视频模型，请先在后台填写 videoModel');
-  const seconds = String(body.seconds || '5');
+  // 原版视频参数：时长 4–30 秒（默认 5）、清晰度 480p/720p/1080p（默认 720p）、
+  // 生成音频默认开、水印默认关；resolution_name / generate_audio / watermark
+  // 按原版 createOpenAIVideoTask 原样发给渠道。
+  const seconds = String(Math.max(4, Math.min(30, Math.floor(Number(body.seconds) || 5))));
+  const resolution = ['480', '720', '1080'].includes(String(body.resolution || '').replace(/p$/i, '')) ? String(body.resolution).replace(/p$/i, '') : '720';
+  const generateAudio = body.generateAudio === undefined ? true : (body.generateAudio !== false && body.generateAudio !== 'false');
+  const watermark = body.watermark === true || body.watermark === 'true';
   const size = String(body.size || '1280x720');
   const headers = { Authorization: 'Bearer ' + channel.apiKey };
   // 首帧：优先用上传的参考图；其次用已生成图片的记录（sourceGenerationId）
@@ -478,7 +487,7 @@ async function generateVideo(channel, body) {
   // 按原版 createOpenAIVideoTask 补齐字段：ratio / resolution_name /
   // generate_audio / watermark / mode（mode 始终 frames，见上）。
   const ratio = inferVideoRatio(size);
-  const fields = { model, prompt, seconds, size, ...(ratio && ratio !== 'auto' ? { ratio } : {}), resolution_name: '720p', generate_audio: 'true', watermark: 'false', mode: 'frames' };
+  const fields = { model, prompt, seconds, size, ...(ratio && ratio !== 'auto' ? { ratio } : {}), resolution_name: resolution + 'p', generate_audio: String(generateAudio), watermark: String(watermark), mode: 'frames' };
   const files = [];
   if (firstFrame) {
     files.push({ name: 'first_frame', filename: 'first.' + firstFrame.ext, mime: firstFrame.mime, buf: firstFrame.buf });
