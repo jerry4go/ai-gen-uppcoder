@@ -1,80 +1,106 @@
+/* AI 生图 / 生视频 — 画廊风（按确认的设计稿：暖米色画廊墙面 + 苹果蓝点缀） */
 *{box-sizing:border-box}
-body{margin:0;font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f4f5f7;color:#1f2937}
-.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:20px 24px;background:#111827;color:#fff}
-.topbar h1{margin:0;font-size:22px}
-.sub{margin:6px 0 0;color:#9ca3af;font-size:13px}
+:root{
+  --bg:#EAE2D0;        /* 暖米色底 */
+  --card:#FAF6EC;      /* 内容面近白 */
+  --gallery:#F3ECDC;   /* 画廊区 */
+  --fill:#E4D8BF;      /* 暖灰填充 */
+  --line:#DCD5C2;      /* 暖色细线 */
+  --txt:#1D1D1F;        /* 近黑正文 */
+  --mut:#6E6E73;        /* 暖灰次要 */
+  --blue:#0071E3;       /* 苹果蓝：只用于主生成按钮与选中态 */
+  --blue-dark:#0077ED;
+  --danger:#D70015;
+}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased}
+/* 顶栏：浅色，安静，一条细线 */
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:28px 24px 20px;background:var(--bg);border-bottom:1px solid var(--line)}
+.topbar h1{margin:0;font-size:32px;font-weight:800;letter-spacing:-.02em;line-height:1.1}
+.sub{margin:8px 0 0;color:var(--mut);font-size:14px;line-height:1.5}
 .top-right{display:flex;gap:8px;align-items:center}
-.health{font-size:13px;color:#a7f3d0}
-.tabs{display:flex;gap:8px;padding:12px 24px 0}
-.tabs button{border:1px solid #d1d5db;background:#fff;padding:8px 16px;border-radius:8px 8px 0 0;cursor:pointer;font-size:14px}
-.tabs button.active{background:#2563eb;color:#fff;border-color:#2563eb}
-main{padding:16px 24px 32px;max-width:980px;margin:0 auto}
+.health{font-size:13px;color:var(--mut)}
+.health.ok{color:#1D7A3A}
+/* 页签：文字式，选中态只有一条蓝线 */
+.tabs{display:flex;gap:28px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--bg)}
+.tabs button{border:0;background:none;padding:14px 2px;cursor:pointer;font-size:15px;color:var(--mut);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button.active{color:var(--txt);border-bottom-color:var(--blue);font-weight:600}
+main{padding:24px;max-width:1060px;margin:0 auto}
 .tab{display:none}.tab.active{display:block}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:18px;margin-bottom:16px}
-.card h2{margin:0 0 12px;font-size:17px}
-.hint{color:#6b7280;font-size:13px;line-height:1.6}
-.muted{color:#9ca3af;font-size:13px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+/* 卡片：近白，无阴影，只一条细线 */
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;margin-bottom:20px}
+.card h2{margin:0 0 16px;font-size:21px;font-weight:700;letter-spacing:-.01em}
+.hint{color:var(--mut);font-size:13px;line-height:1.6}
+.muted{color:var(--mut);font-size:13px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
 .row[hidden]{display:none}
-.seg{display:flex;border:1px solid #d1d5db;border-radius:8px;overflow:hidden}
-.seg button{border:0;background:#fff;padding:8px 14px;cursor:pointer}
-.seg button.active{background:#2563eb;color:#fff}
-textarea,input,select{font:inherit;padding:9px 10px;border:1px solid #d1d5db;border-radius:8px;background:#fff}
-textarea{width:100%;resize:vertical;margin:6px 0}
+/* 生图/生视频切换：浅底分段控件，选中态蓝底白字 */
+.seg{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--fill)}
+.seg button{border:0;background:transparent;padding:9px 18px;cursor:pointer;font-size:14px;color:var(--txt)}
+.seg button.active{background:var(--blue);color:#fff;font-weight:600}
+/* 输入与下拉：暖灰底，细线，圆角，无阴影 */
+textarea,input,select{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--txt)}
+textarea{width:100%;resize:vertical;margin:8px 0;font-size:16px;line-height:1.6;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;padding:12px 2px}
+textarea:focus{outline:none;border-bottom-color:var(--blue)}
+input:focus,select:focus{outline:2px solid rgba(0,113,227,.35);outline-offset:0;border-color:var(--blue)}
 select{min-width:150px}
-.btn{border:1px solid #d1d5db;background:#fff;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:14px}
-.btn.primary{background:#2563eb;color:#fff;border-color:#2563eb}
-.btn.ghost{background:#f9fafb}
-.btn.danger{color:#dc2626;border-color:#fecaca}
+.btn{border:1px solid var(--line);background:#fff;padding:10px 18px;border-radius:999px;cursor:pointer;font-size:14px;color:var(--txt)}
+.btn:hover{border-color:var(--mut)}
+/* 主生成按钮：全站唯一的蓝色 */
+.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:600;padding:12px 28px;font-size:15px}
+.btn.primary:hover{background:var(--blue-dark)}
+.btn.ghost{background:var(--fill)}
+.btn.danger{color:var(--danger);border-color:#F3C2C6}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 /* 保存到相册只在手机上显示（桌面浏览器进不了照片，没用） */
 .save-photos{display:none}
-.status{font-size:13px;color:#2563eb}
-.status.err{color:#dc2626}
+.status{font-size:13px;color:var(--blue)}
+.status.err{color:var(--danger)}
 .form{display:grid;gap:10px;max-width:560px}
-.form label{display:grid;gap:4px;font-size:13px;color:#374151}
-.results{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}
-.result{border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:#fafafa}
-.result img,.result video{width:100%;display:block;max-height:340px;object-fit:contain;background:#111}
+.form label{display:grid;gap:4px;font-size:13px;color:var(--mut)}
+/* 结果画廊：大图先行，无卡片盒子感，暖底 */
+.results{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:16px}
+.result{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--gallery)}
+.result img,.result video{width:100%;display:block;max-height:380px;object-fit:contain;background:#111}
 .result img{cursor:zoom-in}
-/* 图片预览：全屏黑底，图居中自适应；点图切原尺寸（可滚动看细节），点空白处或 × 关闭 */
-#lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:100;display:flex;overflow:auto;touch-action:pan-x pan-y}
+.result .meta{padding:14px 16px 4px}
+.result .meta p{margin:4px 0;font-size:13px;line-height:1.5;word-break:break-word;color:var(--txt)}
+.result .meta p.muted{color:var(--mut)}
+.result .actions{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px 16px}
+.result .actions .btn{padding:8px 14px;font-size:13px}
+.empty{color:var(--mut);text-align:center;padding:32px 0}
+/* 图片预览：浅色毛玻璃底（原先是黑底） */
+#lightbox{position:fixed;inset:0;background:rgba(250,246,236,.96);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:100;display:flex;overflow:auto;touch-action:pan-x pan-y}
 #lightbox[hidden]{display:none}
 #lightbox img{margin:auto;max-width:100vw;max-height:100vh;object-fit:contain;cursor:zoom-in;display:block}
 #lightbox img.zoomed{max-width:none;max-height:none;cursor:zoom-out}
-#lightbox-close{position:fixed;top:12px;left:14px;z-index:101;width:40px;height:40px;border:0;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;font-size:24px;line-height:1;cursor:pointer}
-#lightbox-close:hover{background:rgba(255,255,255,.32)}
+#lightbox-close{position:fixed;top:12px;left:14px;z-index:101;width:40px;height:40px;border:0;border-radius:50%;background:rgba(0,0,0,.08);color:var(--txt);font-size:24px;line-height:1;cursor:pointer}
+#lightbox-close:hover{background:rgba(0,0,0,.16)}
 /* 视频缓冲提示：点播放后等数据时，视频中间转圈圈，别让人以为播不了 */
 .video-wrap{position:relative}
 .video-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
 .video-loading[hidden]{display:none}
 .spinner{width:44px;height:44px;border:4px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.result .meta{padding:10px 12px}
-.result .meta p{margin:4px 0;font-size:13px;line-height:1.5;word-break:break-word}
-.result .actions{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 12px}
-.result .actions .btn{padding:6px 10px;font-size:13px}
-.empty{color:#9ca3af;text-align:center;padding:24px 0}
-.channel{border:1px solid #e5e7eb;border-radius:10px;padding:12px;margin:10px 0}
+.channel{border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0;background:#fff}
 .channel h3{margin:0 0 6px;font-size:15px}
-.channel p{margin:3px 0;font-size:13px;color:#4b5563;word-break:break-all}
-.channel .tag{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:6px;padding:2px 8px;font-size:12px;margin-right:6px}
-.channel .tag.off{background:#fee2e2;color:#991b1b}
+.channel p{margin:3px 0;font-size:13px;color:var(--mut);word-break:break-all}
+.channel .tag{display:inline-block;background:var(--fill);color:var(--txt);border-radius:999px;padding:2px 10px;font-size:12px;margin-right:6px}
+.channel .tag.off{background:#FDE8E8;color:var(--danger)}
 .channel .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.channel .actions .btn{padding:6px 10px;font-size:13px}
-.foot{text-align:center;color:#9ca3af;font-size:12px;padding:16px}
-#ref-preview img{max-width:220px;border-radius:8px;border:1px solid #e5e7eb}
+.channel .actions .btn{padding:6px 12px;font-size:13px}
+.foot{text-align:center;color:var(--mut);font-size:12px;padding:16px}
+#ref-preview img{max-width:220px;border-radius:12px;border:1px solid var(--line)}
 /* 手机版：控件不再挤成一团 */
 @media(max-width:640px){
   .results{grid-template-columns:1fr}
-  .topbar{flex-direction:column;gap:8px;padding:14px 16px}
-  .topbar h1{font-size:19px}
+  .topbar{flex-direction:column;gap:8px;padding:20px 16px 14px}
+  .topbar h1{font-size:26px}
   .topbar .top-right{width:100%;justify-content:space-between}
-  .tabs{padding:10px 12px 0}
-  .tabs button{padding:8px 12px;font-size:13px}
-  main{padding:12px}
-  .card{padding:14px}
-  .card h2{font-size:16px}
+  .tabs{padding:0 16px;gap:20px}
+  .tabs button{padding:12px 2px;font-size:14px}
+  main{padding:16px 12px 24px}
+  .card{padding:18px 16px}
+  .card h2{font-size:18px}
   .row{gap:8px}
   /* 生图/生视频切换整行，两按钮平分 */
   #type-seg{flex:1 1 100%}
