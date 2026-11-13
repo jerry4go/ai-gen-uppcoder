@@ -172,26 +172,27 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('ligh
 async function shareToPhotos(g) {
   const url = media(g.url);
   const fileName = g.fileName || (g.url || '').split('/').pop() || 'media';
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('下载失败');
-    const blob = await res.blob();
-    const file = new File([blob], fileName, { type: blob.type || (g.type === 'video' ? 'video/mp4' : 'image/png') });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+  // 先试系统分享（Web Share API）：分享面板里点“存储图像 / 存储视频”就进相册。
+  // 注意：iPhone 上大视频（几 MB 以上）canShare 经常直接返回 false，
+  // 但直接调 share 有时又能成功，所以只要有 navigator.share 就先试一次，
+  // 别只信 canShare 的判断。
+  if (navigator.share) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('下载失败');
+      const blob = await res.blob();
+      const file = new File([blob], fileName, { type: blob.type || (g.type === 'video' ? 'video/mp4' : 'image/png') });
       await navigator.share({ files: [file] });
-      return;
+      return; // 分享面板已打开，用户在里面选“存储图像 / 存储视频”
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // 用户在分享面板点了取消，不算错
+      // 分享失败（比如大视频 canShare 不通过）就往下走备用方案，不直接下载
     }
-    throw new Error('不支持分享');
-  } catch (e) {
-    if (e && e.name === 'AbortError') return; // 用户在分享面板点了取消，不算错
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setStatus($('gen-status'), '这个浏览器不支持直接存相册，已改用普通下载（会存到“文件”里）');
   }
+  // 备用方案：新标签页打开原文件，手机上长按视频/图片，选“存储视频 / 存储图像”
+  // 就能存到相册。直接下载只会存到“文件”，进不了相册，所以不用下载兜底。
+  window.open(url, '_blank');
+  setStatus($('gen-status'), '已在新标签页打开，长按' + (g.type === 'video' ? '视频' : '图片') + '选“存储' + (g.type === 'video' ? '视频' : '图像') + '”即可存到相册');
 }
 
 // ---------- 扩写提示词（文本模型） ----------
