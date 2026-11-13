@@ -134,6 +134,26 @@ function autoGrowPrompt() {
 }
 $('prompt').addEventListener('input', autoGrowPrompt);
 window.addEventListener('resize', autoGrowPrompt);
+// ---------- 图片预览（点结果图全屏看，像 Zipline 的预览） ----------
+// 点结果图打开全屏预览；再点图切到原尺寸（可滚动看细节）；点空白处、
+// 点 × 或按 Esc 关闭。视频自带播放控件，不走预览。
+function openLightbox(src) {
+  const img = $('lightbox-img');
+  img.classList.remove('zoomed');
+  img.src = src;
+  $('lightbox').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+function closeLightbox() {
+  $('lightbox').hidden = true;
+  $('lightbox-img').src = '';
+  document.body.style.overflow = '';
+}
+$('lightbox-close').addEventListener('click', closeLightbox);
+$('lightbox').addEventListener('click', (e) => { if (e.target === $('lightbox')) closeLightbox(); });
+$('lightbox-img').addEventListener('click', (e) => { e.stopPropagation(); $('lightbox-img').classList.toggle('zoomed'); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('lightbox').hidden) closeLightbox(); });
+
 // ---------- 扩写提示词（文本模型） ----------
 // 文本模型只做纯文本扩写：把提示词框里的短提示词扩写成详细的生成提示词，
 // 填回框里，用户改好再点生成。渠道的文本接口是纯文本的，不支持看图，
@@ -281,6 +301,11 @@ async function loadResults(preloaded) {
       }
     });
   });
+  // 点结果图打开全屏预览
+  document.querySelectorAll('#results .result img').forEach((im) => {
+    im.addEventListener('click', () => openLightbox(im.src));
+  });
+
   // 刷新后仍有未完成的生成（例如刷新页面时后台还在生成），继续轮询直到它完成
   if (list.some((g) => g.status === 'generating') && !pollTimer) {
     $('btn-generate').disabled = true;
