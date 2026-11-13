@@ -38,12 +38,19 @@
       </div>
       <textarea id="prompt" rows="4" placeholder="例如：一只橘猫坐在窗台上看雨，电影感，暖色调…"></textarea>
       <div class="row" id="image-opts">
-        <label>尺寸 <select id="img-size"><option>1024x1024</option><option>1024x1792</option><option>1792x1024</option><option>512x512</option></select></label>
+        <label>画质 <select id="img-quality"><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高</option><option value="max">最高</option></select></label>
+        <label>规格 <select id="img-scale"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option><option value="auto">自动</option></select></label>
+        <label>比例 <select id="img-ratio"><option selected>1:1</option><option>2:3</option><option>3:2</option><option>4:3</option><option>3:4</option><option>16:9</option><option>9:16</option><option>21:9</option><option>9:21</option><option value="auto">自动</option></select></label>
         <label>数量 <select id="img-count"><option>1</option><option>2</option><option>4</option></select></label>
+        <span id="img-size-show" class="muted"></span>
       </div>
       <div class="row" id="video-opts" hidden>
-        <label>时长 <select id="vid-seconds"><option>5</option><option>10</option></select></label>
-        <label>尺寸 <select id="vid-size"><option>1280x720</option><option>720x1280</option><option>1920x1080</option></select></label>
+        <label>清晰度 <select id="vid-res"><option value="480">480p</option><option value="720" selected>720p</option><option value="1080">1080p</option></select></label>
+        <label>比例 <select id="vid-ratio"><option>1:1</option><option>3:4</option><option>4:3</option><option selected>16:9</option><option>9:16</option><option>21:9</option><option value="auto">自动</option></select></label>
+        <label>时长（秒） <input id="vid-seconds" type="number" min="4" max="30" step="1" value="5" style="width:64px"></label>
+        <label><input type="checkbox" id="vid-audio" checked> 生成音频</label>
+        <label><input type="checkbox" id="vid-watermark"> 水印</label>
+        <span id="vid-size-show" class="muted"></span>
       </div>
       <div class="row" id="ref-row" hidden>
         <label class="btn ghost">📷 上传参考图（作视频首帧） <input type="file" id="ref-file" accept="image/*" hidden></label>
