@@ -121,6 +121,19 @@ $('ref-file').addEventListener('change', (e) => {
 });
 $('btn-clear-ref').addEventListener('click', () => { refItems = []; $('ref-file').value = ''; renderRef(); });
 $('btn-clear-prompt').addEventListener('click', () => { $('prompt').value = ''; });
+// ---------- 提示词框按内容自动增高 ----------
+// 扩写后的提示词很长，4 行的框装不下，得拉滚动条才能看全。让框随内容
+// 自动撑高（上限约 45% 屏高，超了才出现滚动条）；输入时、扩写填回时、
+// 从生成记录填回提示词时都重新算一次高度。
+function autoGrowPrompt() {
+  const el = $('prompt');
+  el.style.height = 'auto';
+  const max = Math.floor(window.innerHeight * 0.45);
+  el.style.height = Math.min(el.scrollHeight, max) + 'px';
+  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+}
+$('prompt').addEventListener('input', autoGrowPrompt);
+window.addEventListener('resize', autoGrowPrompt);
 // ---------- 扩写提示词（文本模型） ----------
 // 文本模型只做纯文本扩写：把提示词框里的短提示词扩写成详细的生成提示词，
 // 填回框里，用户改好再点生成。渠道的文本接口是纯文本的，不支持看图，
@@ -134,7 +147,7 @@ $('btn-enhance').addEventListener('click', async () => {
   try {
     const { data } = await apiJson('/api/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, type: genType, channelId: $('gen-channel').value || undefined }) });
     if (!data.ok) setStatus($('gen-status'), '扩写失败：' + (data.error || '未知错误'), true);
-    else { $('prompt').value = data.text || prompt; setStatus($('gen-status'), '已扩写，检查一下再点生成'); }
+    else { $('prompt').value = data.text || prompt; autoGrowPrompt(); setStatus($('gen-status'), '已扩写，检查一下再点生成'); }
   } catch (e) { setStatus($('gen-status'), '扩写失败：' + e.message, true); }
   btn.disabled = false;
 });
@@ -246,7 +259,7 @@ async function loadResults(preloaded) {
       const g = list.find((x) => x.id === b.dataset.id);
       if (!g) return;
       if (b.dataset.act === 'delete') { deleteResult(g.id); }
-      if (b.dataset.act === 'edit-prompt') { $('prompt').value = g.prompt || ''; $('prompt').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+      if (b.dataset.act === 'edit-prompt') { $('prompt').value = g.prompt || ''; autoGrowPrompt(); $('prompt').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
       if (b.dataset.act === 'add-ref') {
         // 把这张生成图片加进参考图列表（换装等多张参考图时用）
         if (refItems.some((x) => x.kind === 'generation' && x.generationId === g.id)) { setStatus($('gen-status'), '这张图已经是参考图了'); return; }
@@ -259,6 +272,7 @@ async function loadResults(preloaded) {
         // 图生视频：切到生视频，这张图作首帧（参考图列表第 1 张），提示词填回去可改
         document.querySelector('#type-seg button[data-type="video"]').click();
         $('prompt').value = g.prompt || '';
+        autoGrowPrompt();
         refItems = [{ key: 'g' + g.id, kind: 'generation', label: '生成图片', generationId: g.id, fileName: g.fileName }];
         renderRef();
         $('ref-name').textContent = '已用这张生成图片作首帧';
