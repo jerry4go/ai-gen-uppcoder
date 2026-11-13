@@ -7,5 +7,13 @@ services:
     environment:
       - PORT=8000
     volumes:
-      - ./data:/app/data
+      - ai-gen-data:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 1G
     restart: unless-stopped
+
+volumes:
+  ai-gen-data:
