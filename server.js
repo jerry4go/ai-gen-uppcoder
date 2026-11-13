@@ -350,11 +350,15 @@ function resolveChannelUrl(channel, url) {
   // 就是这个内网地址，Uppcoder 上根本连不上，下载会报 fetch failed）。
   // 只要路径对，换成渠道 Base URL 的域名就能走公网取到：
   // 相对路径按 Base URL 解析；绝对地址但域名不同时，只换域名、保留路径。
+  // 注意：必须同时换端口——只换 host 不换 port 时，内网地址的 :1314
+  // 端口会被保留下来，拼成 https://域名:1314/...，Cloudflare 边缘根本
+  // 不监听 1314 端口，连接会直接超时（2026-11-13 00:36 实测：带 :1314
+  // 的地址 curl 15 秒超时、0 字节；去掉端口后 1 秒下载成功）。
   if (!url) return '';
   try {
     const base = new URL(channel.baseUrl.replace(/\/$/, '') + '/');
     const u = new URL(url, base);
-    if (u.origin !== base.origin) u.protocol = base.protocol, u.host = base.host;
+    if (u.origin !== base.origin) u.protocol = base.protocol, u.host = base.host, u.port = base.port;
     return u.toString();
   } catch { return url; }
 }
