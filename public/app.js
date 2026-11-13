@@ -262,7 +262,7 @@ async function loadResults(preloaded) {
     const mediaHtml = g.status === 'generating'
       ? `<div style="padding:40px;text-align:center;color:#666">⏳ ${esc(g.note || '生成中（模型那边还在生成，请稍等）…')}</div>`
       : g.type === 'video'
-      ? `<video src="${media(g.url)}" controls preload="metadata"></video>`
+      ? `<div class="video-wrap"><video src="${media(g.url)}" controls preload="metadata"></video><div class="video-loading" hidden><span class="spinner"></span></div></div>`
       : (g.url ? `<img src="${media(g.url)}" alt="">` : `<div style="padding:40px;text-align:center;color:#999">图片已失效</div>`);
     const extra = g.type === 'image' && g.status !== 'generating' ? `<button class="btn" data-act="to-video" data-id="${g.id}">🎬 用这张图生成视频</button><button class="btn" data-act="add-ref" data-id="${g.id}">＋ 设为参考图</button><button class="btn" data-act="edit-prompt" data-id="${g.id}">✏️ 编辑提示词</button>` : '';
     return `<div class="result">${mediaHtml}<div class="meta">
@@ -304,6 +304,21 @@ async function loadResults(preloaded) {
   // 点结果图打开全屏预览
   document.querySelectorAll('#results .result img').forEach((im) => {
     im.addEventListener('click', () => openLightbox(im.src));
+  });
+
+  // 视频缓冲提示：点播放后数据没到就转圈，播起来 / 能播了就藏起来
+  document.querySelectorAll('#results .result video').forEach((v) => {
+    const overlay = v.closest('.video-wrap').querySelector('.video-loading');
+    const show = () => { overlay.hidden = false; };
+    const hide = () => { overlay.hidden = true; };
+    v.addEventListener('waiting', show);
+    v.addEventListener('stalled', show);
+    v.addEventListener('play', () => { if (v.readyState < 3) show(); });
+    v.addEventListener('playing', hide);
+    v.addEventListener('canplay', hide);
+    v.addEventListener('loadeddata', hide);
+    v.addEventListener('pause', hide);
+    v.addEventListener('error', hide);
   });
 
   // 刷新后仍有未完成的生成（例如刷新页面时后台还在生成），继续轮询直到它完成
