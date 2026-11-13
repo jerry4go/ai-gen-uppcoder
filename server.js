@@ -14,6 +14,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
+
 
 const PORT = parseInt(process.env.PORT || '8000', 10);
 const HOST = '0.0.0.0';
@@ -180,6 +182,34 @@ function fetchTimeout(url, opts, ms) {
     return fetch(url, { ...o, signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
+// 用 curl 下载一个 URL 到临时文件，返回响应的 Content-Type。
+// 2026-11-13 00:05 实测：同一容器内 curl 下载隧道媒体地址一次成功
+// （200，2.1MB，1.8s），而 Node fetch 对同一地址 3 次全是 fetch
+// failed——undici 与 Cloudflare 隧道边缘在大文件下载上的交互问题，
+// 小 JSON 轮询走 fetch 正常。curl 是容器自带的，优先用它。
+function curlDownload(url, tmpPath) {
+  return new Promise((resolve, reject) => {
+    execFile('curl', ['-sS', '-L', '--max-time', '180', '-A', BROWSER_UA, '-o', tmpPath, '-w', '%{http_code} %{content_type}', url],
+             { timeout: 185000, maxBuffer: 1024 * 1024 },
+             (err, stdout, stderr) => {
+               if (err) {
+                 const e = new Error('curl 下载失败: ' + String((stderr && String(stderr).trim()) || err.message || err));
+                 return reject(e);
+               }
+               const out = String(stdout || '').trim();
+               const sp = out.indexOf(' ');
+               const code = parseInt(sp >= 0 ? out.slice(0, sp) : out, 10);
+               const ctype = sp >= 0 ? out.slice(sp + 1).trim() : '';
+               if (!code || code < 200 || code >= 300) {
+                 const e = new Error('下载生成文件失败 HTTP ' + (code || 'unknown'));
+                 e.isHttpError = true; e.httpStatus = code || 0; e.doNotRetry = true;
+                 return reject(e);
+               }
+               resolve(ctype);
+             });
+  });
+}
+
 async function downloadToMedia(url, prefix) {
   // 注意：到这里渠道已经生成好了文件，只是在下载。下载失败时绝不能
   // 让外层重试整个生成调用——那会让渠道侧再烧一次生成。下载错误
@@ -192,20 +222,34 @@ async function downloadToMedia(url, prefix) {
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetchTimeout(url, {}, 180000);
-      if (!res.ok) {
-        const err = new Error('下载生成文件失败 HTTP ' + res.status);
-        err.isHttpError = true; err.httpStatus = res.status; err.doNotRetry = true;
-        throw err;
+      let mime = '';
+      let buf = null;
+      const tmpName = 'dl-' + crypto.randomBytes(8).toString('hex') + '.tmp';
+      const tmpPath = path.join(MEDIA_DIR, tmpName);
+      try {
+        mime = await curlDownload(url, tmpPath);
+        buf = fs.readFileSync(tmpPath);
+      } catch (curlErr) {
+        if (curlErr && curlErr.isHttpError) throw curlErr;
+        // curl 不可用或传输失败：回退到 fetch 再试一次
+        const res = await fetchTimeout(url, {}, 180000);
+        if (!res.ok) {
+          const err = new Error('下载生成文件失败 HTTP ' + res.status);
+          err.isHttpError = true; err.httpStatus = res.status; err.doNotRetry = true;
+          throw err;
+        }
+        mime = (res.headers.get('content-type') || '').split(';')[0].trim();
+        buf = Buffer.from(await res.arrayBuffer());
+      } finally {
+        if (fs.existsSync(tmpPath)) { try { fs.unlinkSync(tmpPath); } catch {} }
       }
-      const mime = (res.headers.get('content-type') || '').split(';')[0].trim() || (prefix === 'video' ? 'video/mp4' : 'image/png');
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (!buf.length) throw new Error('下载到的文件为空');
+      mime = mime || (prefix === 'video' ? 'video/mp4' : 'image/png');
+      if (!buf || !buf.length) throw new Error('下载到的文件为空');
       return saveMediaBuffer(buf, mime, prefix);
     } catch (e) {
       lastErr = e;
       if (isHttpError(e) || !isTransportError(e) || attempt >= 3) break;
-      console.error('download attempt ' + attempt + ' failed, retrying:', e.message);
+      console.error('download attempt ' + attempt + ' failed, retrying:', e.message, 'url=' + url);
       await sleep(attempt === 1 ? 10000 : 20000);
     }
   }
